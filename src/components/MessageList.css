@@ -16,7 +16,7 @@
   --ml-line: 18px;
   --ml-line-gap: 3px;
   --ml-row-pad: 10px;
-  --ml-star: 28px;
+  --ml-star: 26px;
 
   display: flex;
   flex-direction: column;
@@ -192,11 +192,9 @@
 
 /* -- scroll container ------------------------------------------------------ */
 
+/* Sizing and overflow belong to `OverlayScroll`; this only carries the list's
+   own concerns. */
 .ml-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
   outline: none;
 }
 
@@ -204,7 +202,7 @@
    the column keeps its own margins as the window widens. */
 .ml-rows {
   width: 100%;
-  max-width: 560px;
+  max-width: 460px;
   margin: 0 auto;
 }
 /* the cursor row carries the focus affordance, not the whole container */
@@ -220,7 +218,10 @@
   grid-template-columns: var(--ml-rail) minmax(0, 1fr) var(--ml-star);
   column-gap: var(--ml-col-gap);
   align-items: start;
-  padding: var(--ml-row-pad) 6px var(--ml-row-pad) var(--ml-pad-x);
+  /* Equal insets left and right. The star lives inside the right inset rather
+     than pushing the text off-centre, and there is no scrollbar gutter to
+     account for any more — see `OverlayScroll`. */
+  padding: var(--ml-row-pad) var(--ml-pad-x);
   cursor: default;
   transition: background var(--dur-fast) var(--ease-out);
 }
@@ -231,7 +232,7 @@
   content: "";
   position: absolute;
   left: var(--ml-text-x);
-  right: 0;
+  right: var(--ml-pad-x);
   bottom: 0;
   height: 1px;
   background: var(--line);
@@ -259,7 +260,7 @@
 }
 
 .ml-row.selected::after {
-  left: 0;
+  left: var(--ml-pad-x);
   background: var(--line-strong);
 }
 
@@ -270,7 +271,11 @@
 
 /* -- row: unread rail ------------------------------------------------------ */
 
+/* The rail holds two things in the same
+   spot: the unread dot, and the selection box that covers it. Stacking rather
+   than reserving a second column keeps the row as narrow as it was. */
 .ml-row-rail {
+  position: relative;
   display: flex;
   justify-content: center;
   height: var(--ml-line);
@@ -282,10 +287,86 @@
   height: var(--ml-rail);
   border-radius: 50%;
   background: transparent;
-  transition: background var(--dur-base) var(--ease-out);
+  transition: background var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
 }
 .ml-row.unread .ml-row-dot {
   background: var(--accent);
+}
+
+/* Hidden until the pointer is over the row, or something is already picked —
+   Gmail's rule. A column of empty boxes down a mailbox you are only reading is
+   forty affordances for a thing you are not doing. */
+.ml-row-check {
+  /* Centred on the rail explicitly. Without coordinates an absolutely
+     positioned box falls back to its static position — beside the dot rather
+     than over it. `margin: auto` cannot do it either: the box is wider than the
+     rail, so the margins resolve to zero and it sits flush left. Translating
+     off its own centre works at any size and leaves the row's width alone. */
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  transform: translate(-50%, -50%);
+  accent-color: var(--accent);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.ml-row:hover .ml-row-check,
+.ml-row-check:focus-visible,
+.ml-row-check:checked,
+.ml-list-picking .ml-row-check {
+  opacity: 1;
+}
+/* Once the box is showing, the dot underneath would read as a smudge. */
+.ml-row:hover .ml-row-dot,
+.ml-row.picked .ml-row-dot,
+.ml-list-picking .ml-row-dot {
+  opacity: 0;
+}
+
+/* The batch toolbar. It appears in a column ~500px wide with five actions in
+   it, so it wraps rather than overflowing — and the count is pinned on one
+   line, because a number reading vertically down the left edge is the first
+   thing that looks broken. */
+.ml-selbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px var(--ml-pad-x);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.ml-selbar-count {
+  flex: none;
+  margin-right: 2px;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ml-selbar .btn {
+  flex: none;
+}
+
+/* Pushes the dismiss button to the end of whichever row it lands on. */
+.ml-selbar .icon-btn {
+  margin-left: auto;
+}
+
+.ml-scope-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* -- row: three-line body -------------------------------------------------- */
@@ -309,18 +390,18 @@
 .ml-from {
   flex: 1;
   min-width: 0;
-  font-size: var(--text-base);
-  font-weight: 500;
+  font-size: var(--text-sm);
+  font-weight: 550;
   line-height: var(--ml-line);
-  color: var(--ink-2);
-  letter-spacing: -0.005em;
+  color: var(--ink-3);
+  letter-spacing: 0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ml-row.unread .ml-from {
-  font-weight: 650;
-  color: var(--ink);
+  font-weight: 600;
+  color: var(--ink-2);
 }
 .ml-row.selected .ml-from {
   color: var(--ink);
@@ -350,19 +431,25 @@
   color: var(--ink-2);
 }
 
+/* The reading pane sets `.mv-subject` in the display serif; so does this, at
+   list scale. The references are unanimous that the display face carries
+   negative tracking and never goes bold — weight 400/500 with a colour step is
+   what marks unread here, not a heavier serif. */
 .ml-subject {
   flex: 1;
   min-width: 0;
-  font-size: var(--text-sm);
-  font-weight: 450;
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  font-weight: 400;
   line-height: var(--ml-line);
+  letter-spacing: -0.012em;
   color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ml-row.unread .ml-subject {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -374,6 +461,26 @@
   padding: 0 7px;
   font-size: var(--text-xs);
   line-height: 17px;
+}
+
+/* How many messages the collapsed row stands for. Deliberately quiet — it is
+   a count, not a status, and it sits next to a subject that matters more. */
+.ml-thread {
+  flex: none;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 17px;
+  text-align: center;
+}
+
+.ml-row.unread .ml-thread {
+  color: var(--text-1);
 }
 
 .ml-preview {
@@ -557,7 +664,7 @@
   content: "";
   position: absolute;
   left: var(--ml-text-x);
-  right: 0;
+  right: var(--ml-pad-x);
   bottom: 0;
   height: 1px;
   background: var(--line);
@@ -688,18 +795,21 @@
   background: var(--accent);
 }
 
-/* The receiving mailbox, shown only when the list spans more than one account.
-   It must never push the date around, so it shrinks before the sender does. */
+/* The receiving mailbox. On every row now, so it has to be the quietest thing
+   on the line: mono for the address shape, no fill, and first to shrink — it
+   must never push the date around or outrank the sender. */
 .ml-acct {
-  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
   color: var(--ink-faint);
-  background: var(--surface-2);
-  border-radius: var(--radius-pill);
-  padding: 1px 7px;
-  max-width: 40%;
+  max-width: 45%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex-shrink: 1;
+  flex-shrink: 2;
   min-width: 0;
+}
+.ml-row.unread .ml-acct {
+  color: var(--ink-3);
 }

@@ -1,16 +1,21 @@
 /**
- * Custom window chrome for the platforms that let us draw it.
+ * The app's one top bar: brand at the left, window controls at the right.
  *
  * The window runs undecorated on Windows and Linux so the title bar belongs to
  * the app rather than the OS — a stock Windows caption bar sits badly against
  * this palette. macOS keeps its traffic lights (Mac users reach for them by
- * muscle memory); we only inset our own header out of their way. Mobile has no
- * window chrome at all, so nothing renders.
+ * muscle memory); the brand just shifts right of them.
+ *
+ * The brand lives here rather than in the sidebar because it used to live in
+ * both places: an empty caption strip stacked on top of a sidebar header, two
+ * bars and a seam in the top-left corner for one wordmark. One bar, no rule
+ * under it, and the canvas runs straight down into the sidebar.
  */
 
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { hostPlatform } from "../lib/api";
+import { Icon } from "./Icon";
 import "./TitleBar.css";
 
 type Chrome = "custom" | "inset" | "none";
@@ -72,20 +77,43 @@ export function TitleBar() {
     return () => unlisten?.();
   }, [chrome]);
 
-  if (chrome === "none") return null;
+  // The brand is the same lockup at every size; only what sits beside it
+  // changes with the platform.
+  const brand = (
+    <span className="titlebar-brand">
+      <span className="titlebar-mark" aria-hidden>
+        <Icon name="mail" size={15} />
+      </span>
+      <span className="wordmark">Mailer</span>
+    </span>
+  );
 
-  // macOS: an empty strip that keeps content clear of the traffic lights.
+  // Mobile has no window chrome, but it still wants the app's name at the top.
+  if (chrome === "none") {
+    return (
+      <div className="titlebar titlebar-plain">
+        {brand}
+        <div className="titlebar-drag" />
+      </div>
+    );
+  }
+
+  // macOS: the traffic lights own the far left, so the brand starts to their
+  // right and we draw no controls of our own.
   if (chrome === "inset") {
-    return <div className="titlebar titlebar-inset" data-tauri-drag-region />;
+    return (
+      <div className="titlebar titlebar-inset" data-tauri-drag-region>
+        {brand}
+        <div className="titlebar-drag" data-tauri-drag-region />
+      </div>
+    );
   }
 
   const win = getCurrentWindow();
 
   return (
-    // No wordmark here: the sidebar carries the brand directly below it, and two
-    // stacked "Mailer" labels read as a mistake rather than as emphasis. This
-    // strip is the drag region and the window controls, nothing more.
     <div className="titlebar" data-tauri-drag-region>
+      {brand}
       <div className="titlebar-drag" data-tauri-drag-region />
 
       <div className="titlebar-controls">

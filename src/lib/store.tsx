@@ -20,17 +20,29 @@ import type {
   Category,
   CategoryCount,
   EmailMessage,
+  LabelCount,
+  MailLabel,
+  DraftKind,
   MessagePage,
   SyncStatus,
 } from "./types";
 
 export type ThemePref = "light" | "dark" | "system";
 export type View = "mail" | "settings";
-export type SettingsTab = "accounts" | "ai" | "knowledge" | "channels" | "about";
+export type SettingsTab =
+  | "accounts"
+  | "ai"
+  | "knowledge"
+  | "tools"
+  | "privacy"
+  | "channels"
+  | "about";
 
 export interface MailFilter {
   accountId: string | null;
   category: Category | null;
+  /** one of the user's own labels */
+  labelId: string | null;
   starredOnly: boolean;
   unreadOnly: boolean;
   search: string;
@@ -45,6 +57,10 @@ export interface Toast {
 export interface ComposeState {
   accountId: string;
   to: string;
+  /** Visible copies. Everyone on the thread sees these. */
+  cc: string;
+  /** Blind copies — never written into a header, see `smtp::send`. */
+  bcc: string;
   subject: string;
   body: string;
   inReplyTo: string | null;
@@ -53,6 +69,7 @@ export interface ComposeState {
 const EMPTY_FILTER: MailFilter = {
   accountId: null,
   category: null,
+  labelId: null,
   starredOnly: false,
   unreadOnly: false,
   search: "",
@@ -64,6 +81,8 @@ interface AppStore {
   // data
   accounts: AccountPublic[];
   counts: CategoryCount[];
+  labels: MailLabel[];
+  labelCounts: LabelCount[];
   syncMap: Record<string, SyncStatus>;
   page: MessagePage;
   filter: MailFilter;
@@ -76,6 +95,10 @@ interface AppStore {
   view: View;
   settingsTab: SettingsTab;
   theme: ThemePref;
+  /** Refuse remote content in mail until asked, per message. Default on. */
+  blockTrackers: boolean;
+  /** Show a reply chain as one row. Default on. */
+  groupThreads: boolean;
   alerts: AlertEvent[];
   toasts: Toast[];
   compose: ComposeState | null;
@@ -88,22 +111,38 @@ interface AppStore {
 
   // actions
   refreshAccounts: () => Promise<void>;
+  /** Re-read the labels and their counts — after editing them, or after a sync. */
+  refreshLabels: () => Promise<void>;
   refreshList: () => Promise<void>;
   loadMore: () => Promise<void>;
   setFilter: (patch: Partial<MailFilter>) => void;
   select: (id: string | null) => Promise<void>;
   toggleStar: (id: string, starred: boolean) => Promise<void>;
   markRead: (ids: string[], read: boolean) => Promise<void>;
-  remove: (ids: string[], onServer: boolean) => Promise<void>;
+  /** Star or unstar a selection. */
+  starMany: (ids: string[], starred: boolean) => Promise<void>;
+  /**
+   * Delete mail. Defaults to deleting on the server too — in this app "删除"
+   * means the message is gone, not merely hidden here. Optimistic: the rows go
+   * immediately and come back if the server refuses.
+   */
+  remove: (ids: string[], onServer?: boolean) => Promise<void>;
   sync: (accountId?: string | null) => Promise<void>;
   openSettings: (tab?: SettingsTab) => void;
   closeSettings: () => void;
   setTheme: (t: ThemePref) => void;
+  setBlockTrackers: (v: boolean) => Promise<void>;
+  setGroupThreads: (v: boolean) => Promise<void>;
   pushToast: (kind: Toast["kind"], text: string) => void;
   dismissToast: (id: number) => void;
   dismissAlert: (messageId: string) => void;
   openAlertMessage: (a: AlertEvent) => Promise<void>;
   openCompose: (init?: Partial<ComposeState>) => void;
+  /**
+   * Open the composer for a reply / reply-all / forward of one message.
+   * The recipient set comes from the backend — see `mailer_core::reply`.
+   */
+  composeFrom: (id: string, kind: DraftKind) => Promise<void>;
   closeCompose: () => void;
   setAssistantOpen: (open: boolean) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -130,6 +169,8 @@ let toastSeq = 1;
 export function AppProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<AccountPublic[]>([]);
   const [counts, setCounts] = useState<CategoryCount[]>([]);
+  const [labels, setLabels] = useState<MailLabel[]>([]);
+  const [labelCounts, setLabelCounts] = useState<LabelCount[]>([]);
   const [syncMap, setSyncMap] = useState<Record<string, SyncStatus>>({});
   const [page, setPage] = useState<MessagePage>({ items: [], total: 0, unread: 0 });
   const [filter, setFilterState] = useState<MailFilter>(EMPTY_FILTER);
@@ -142,6 +183,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<ThemePref>(
     () => (localStorage.getItem("mailer.theme") as ThemePref) || "system",
   );
+  // The tracker switch lives here rather than in the settings screen: the
+  // reading pane has to honour it the moment it changes, and both need one
+  // answer to "are we blocking".
+  const [blockTrackers, setBlockTrackersState] = useState(true);
+  // Same reasoning for grouping: the list renders a row differently depending
+  // on it, and the backend decides what a page contains from the same stored
+  // value — so this is a mirror of the setting, never a second opinion.
+  const [groupThreads, setGroupThreadsState] = useState(true);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [compose, setCompose] = useState<ComposeState | null>(null);
@@ -153,8 +202,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
   filterRef.current = filter;
   const pageRef = useRef(page);
   pageRef.current = page;
+  // `select` is memoised on very little, and re-creating it whenever the
+  // grouping preference changes would re-run every effect that depends on it.
+  const groupThreadsRef = useRef(groupThreads);
+  groupThreadsRef.current = groupThreads;
 
   // -- theme ----------------------------------------------------------------
+  // Read the stored preference once. Blocking stays on until told otherwise,
+  // which is also what happens if this read fails.
+  useEffect(() => {
+    void api
+      .getPrivacySettings()
+      .then((p) => setBlockTrackersState(p.blockTrackers))
+      .catch(() => {});
+    void api
+      .getReadingSettings()
+      .then((r) => setGroupThreadsState(r.groupThreads))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     applyTheme(theme);
     localStorage.setItem("mailer.theme", theme);
@@ -188,10 +254,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [pushToast]);
 
+  const refreshLabels = useCallback(async () => {
+    // Quietly: labels are an optional feature and a failure here must not put a
+    // toast in front of somebody who never made one.
+    try {
+      const [ls, cs] = await Promise.all([api.listLabels(), api.labelCounts()]);
+      setLabels(ls);
+      setLabelCounts(cs);
+    } catch {
+      /* leave what we have */
+    }
+  }, []);
+
   const queryFromFilter = useCallback((f: MailFilter, offset: number) => {
     return {
       accountId: f.accountId,
       category: f.category,
+      labelId: f.labelId,
       unreadOnly: f.unreadOnly,
       starredOnly: f.starredOnly,
       search: f.search || null,
@@ -254,8 +333,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const msg = await api.getMessage(id);
         setSelected(msg);
-        if (msg.unread) {
-          await api.markRead([id], true);
+        // Grouped, the row that was clicked stands for the whole conversation,
+        // so opening it has to clear the whole conversation. Marking only this
+        // message would leave the row bold on an unread reply the user cannot
+        // even see from the list.
+        const row = pageRef.current.items.find((m) => m.id === id);
+        const wholeThread = groupThreadsRef.current && !!msg.threadId;
+        if (msg.unread || (wholeThread && row?.unread)) {
+          if (wholeThread) {
+            await api.markThreadRead(msg.threadId, true);
+          } else {
+            await api.markRead([id], true);
+          }
           setPage((p) => ({
             ...p,
             unread: Math.max(0, p.unread - 1),
@@ -287,6 +376,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [pushToast],
   );
 
+  const starMany = useCallback(
+    async (ids: string[], starred: boolean) => {
+      if (ids.length === 0) return;
+      try {
+        await api.setStarredMany(ids, starred);
+        setPage((p) => ({
+          ...p,
+          items: p.items.map((m) => (ids.includes(m.id) ? { ...m, starred } : m)),
+        }));
+        setSelected((s) => (s && ids.includes(s.id) ? { ...s, starred } : s));
+      } catch (e) {
+        pushToast("error", `操作失败: ${e}`);
+      }
+    },
+    [pushToast],
+  );
+
   const markReadAction = useCallback(
     async (ids: string[], read: boolean) => {
       try {
@@ -299,18 +405,57 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [pushToast, refreshList],
   );
 
+  /**
+   * Delete mail, optimistically.
+   *
+   * Deleting on the server is a network round trip; waiting for it before the
+   * row disappears makes the app feel broken on a slow mailbox. So the rows go
+   * first and the request follows. If the server refused, the backend reports
+   * which ids it kept and they come back with a warning — a delete that silently
+   * failed would otherwise reappear at the next sync with no explanation.
+   */
   const remove = useCallback(
-    async (ids: string[], onServer: boolean) => {
+    async (ids: string[], onServer = true) => {
+      if (ids.length === 0) return;
+      const gone = new Set(ids);
+
+      // Hide them now, deriving the new page from the latest state rather than
+      // from a ref snapshot: two deletes issued before React commits would
+      // both read the same stale page, and the second would put back what the
+      // first removed. The updater stays pure — it counts what it is dropping
+      // instead of mutating a counter — so StrictMode running it twice gives
+      // the same answer both times.
+      setPage((cur) => {
+        const dropped = cur.items.filter((m) => gone.has(m.id));
+        return {
+          items: cur.items.filter((m) => !gone.has(m.id)),
+          total: Math.max(0, cur.total - dropped.length),
+          unread: Math.max(0, cur.unread - dropped.filter((m) => m.unread).length),
+        };
+      });
+      const wasOpen = selectedId !== null && gone.has(selectedId);
+      if (wasOpen) {
+        setSelected(null);
+        setSelectedId(null);
+      }
+
       try {
-        await api.deleteMessages(ids, onServer);
-        if (selectedId && ids.includes(selectedId)) {
-          setSelected(null);
-          setSelectedId(null);
+        const report = await api.deleteMessages(ids, onServer);
+        if (report.failed.length > 0) {
+          // The mail is still on the server, so it has to be visible again.
+          await refreshList();
+          pushToast(
+            "error",
+            `${report.failed.length} 封邮件删除失败，已恢复显示：${report.error ?? "服务器未说明原因"}`,
+          );
+          return;
         }
-        await refreshList();
-        pushToast("ok", onServer ? "已删除（含服务器）" : "已从本地删除");
+        // The counters were adjusted from the loaded page only; a full refresh
+        // reconciles them with the rest of the mailbox and pulls in the next row.
+        void refreshList();
       } catch (e) {
-        pushToast("error", `删除失败: ${e}`);
+        await refreshList();
+        pushToast("error", `删除失败，已恢复显示: ${e}`);
       }
     },
     [pushToast, refreshList, selectedId],
@@ -336,6 +481,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setTheme = useCallback((t: ThemePref) => setThemeState(t), []);
 
+  const setBlockTrackers = useCallback(async (v: boolean) => {
+    // Optimistic: the pane should stop blocking the instant the switch moves,
+    // and a failed write is worth a toast rather than a frozen switch.
+    setBlockTrackersState(v);
+    try {
+      await api.setPrivacySettings({ blockTrackers: v });
+    } catch (e) {
+      setBlockTrackersState(!v);
+      pushToast("error", `保存失败: ${e}`);
+    }
+  }, [pushToast]);
+
+  const setGroupThreads = useCallback(
+    async (v: boolean) => {
+      setGroupThreadsState(v);
+      try {
+        await api.setReadingSettings({ groupThreads: v });
+        // The backend reads the stored value to build a page, so the list has
+        // to be asked again — nothing about the current one is still true.
+        await refreshList();
+      } catch (e) {
+        setGroupThreadsState(!v);
+        pushToast("error", `保存失败: ${e}`);
+      }
+    },
+    [pushToast, refreshList],
+  );
+
   const dismissAlert = useCallback((messageId: string) => {
     setAlerts((a) => a.filter((x) => x.messageId !== messageId));
   }, []);
@@ -359,6 +532,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setCompose({
         accountId: init?.accountId ?? first.id,
         to: init?.to ?? "",
+        cc: init?.cc ?? "",
+        bcc: init?.bcc ?? "",
         subject: init?.subject ?? "",
         body: init?.body ?? "",
         inReplyTo: init?.inReplyTo ?? null,
@@ -366,6 +541,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     [accounts, pushToast],
   );
+  const composeFrom = useCallback(
+    async (id: string, kind: DraftKind) => {
+      try {
+        const msg = await api.getMessage(id);
+        const d = await api.prepareDraft(id, kind, formatFullDate(msg.date));
+        openCompose({
+          accountId: d.accountId,
+          to: d.to.join(", "),
+          cc: d.cc.join(", "),
+          subject: d.subject,
+          body: d.body,
+          inReplyTo: d.inReplyTo,
+        });
+      } catch (e) {
+        pushToast("error", `无法打开撰写窗口: ${e}`);
+      }
+    },
+    [openCompose, pushToast],
+  );
+
   const closeCompose = useCallback(() => setCompose(null), []);
 
   // -- backend events -------------------------------------------------------
@@ -378,6 +573,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         void refreshList();
+        // New mail changes the label counts too, and the sidebar is showing them.
+        void refreshLabels();
       }, 400);
     };
 
@@ -413,6 +610,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     // initial load
     void refreshAccounts();
+    void refreshLabels();
     void api
       .syncStatuses()
       .then((list) => {
@@ -435,6 +633,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       accounts,
       counts,
+      labels,
+      labelCounts,
       syncMap,
       page,
       filter,
@@ -445,26 +645,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
       view,
       settingsTab,
       theme,
+      blockTrackers,
+      groupThreads,
       alerts,
       toasts,
       compose,
       refreshAccounts,
+      refreshLabels,
       refreshList,
       loadMore,
       setFilter,
       select,
       toggleStar,
       markRead: markReadAction,
+      starMany,
       remove,
       sync,
       openSettings,
       closeSettings,
       setTheme,
+      setBlockTrackers,
+      setGroupThreads,
       pushToast,
       dismissToast,
       dismissAlert,
       openAlertMessage,
       openCompose,
+      composeFrom,
       closeCompose,
       assistantOpen,
       paletteOpen,
@@ -475,10 +682,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
     [
       accounts, counts, syncMap, page, filter, selected, selectedId,
-      loadingList, loadingMore, view, settingsTab, theme, alerts, toasts, compose,
+      loadingList, loadingMore, view, settingsTab, theme, blockTrackers, groupThreads, alerts, toasts, compose,
+      labels, labelCounts, refreshLabels,
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
-      markReadAction, remove, sync, openSettings, closeSettings, setTheme,
-      pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, closeCompose,
+      markReadAction, starMany, remove, sync, openSettings, closeSettings, setTheme, setGroupThreads,
+      pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, composeFrom, closeCompose,
       assistantOpen, paletteOpen, shortcutsOpen,
     ],
   );

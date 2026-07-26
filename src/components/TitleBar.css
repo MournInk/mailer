@@ -1,27 +1,73 @@
-/* Sits on the same surface as the sidebar column beneath it and carries no
-   bottom rule, so the two read as one continuous panel rather than a bar
-   stacked on a bar. */
+/* The app's single top bar. Same surface as the sidebar below it and no bottom
+   rule, so the brand, the canvas and the sidebar read as one panel instead of a
+   bar stacked on a bar with a seam between them. */
 .titlebar {
   flex: 0 0 auto;
-  height: 38px;
+  height: 46px;
   display: flex;
-  align-items: stretch;
-  justify-content: space-between;
+  align-items: center;
   background: var(--bg);
   user-select: none;
   -webkit-user-select: none;
 }
 
+/* The lockup lines up with the sidebar rows underneath: same 12px inset, so the
+   wordmark and the nav labels share a left edge. */
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+  height: 100%;
+  padding: 0 12px;
+  pointer-events: none;
+}
+
+.titlebar-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+}
+
+/* The display serif, with the negative tracking every one of the reference
+   systems insists on for it — and never bold, for the same reason. */
+.wordmark {
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-md);
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .titlebar-drag {
   flex: 1;
   min-width: 0;
+  align-self: stretch;
 }
 
-/* macOS: no controls of our own, just clearance for the traffic lights. */
+/* macOS: the traffic lights sit in the top-left, so the brand starts clear of
+   them. 72px is the standard three-light cluster plus its margin. */
 .titlebar-inset {
-  height: 30px;
+  height: 40px;
   background: transparent;
-  border-bottom: none;
+}
+.titlebar-inset .titlebar-brand {
+  padding-left: 72px;
+}
+
+/* No window controls to make room for. */
+.titlebar-plain {
+  height: 44px;
 }
 
 .titlebar-controls {
@@ -65,9 +111,9 @@
   color: #fff;
 }
 
-/* No window chrome on a phone. */
+/* No window chrome on a phone; `titlebar-plain` carries the brand instead. */
 @media (pointer: coarse) and (max-width: 900px) {
-  .titlebar {
+  .titlebar-controls {
     display: none;
   }
 }

@@ -537,6 +537,292 @@ fn parse_gemini(v: &Value) -> Completion {
     Completion { text, reasoning: None, calls }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+/// Ask for a streamed response, and give back the URL to send it to.
+///
+/// Three of the four providers take a `stream` flag in the body; Gemini changes
+/// the method in the path instead, and needs `alt=sse` or it answers with a JSON
+/// array rather than events.
+pub fn make_streaming(provider: AiProvider, body: &mut Value, url: &str) -> String {
+    match provider {
+        AiProvider::Gemini => {
+            let (path, query) = url.split_once('?').unwrap_or((url, ""));
+            let path = path.replace(":generateContent", ":streamGenerateContent");
+            let mut out = format!("{path}?alt=sse");
+            if !query.is_empty() {
+                out.push('&');
+                out.push_str(query);
+            }
+            out
+        }
+        _ => {
+            body["stream"] = json!(true);
+            url.to_string()
+        }
+    }
+}
+
+/// One round, assembled from its stream.
+///
+/// Every provider fragments a response differently, and two of them fragment
+/// tool arguments across events — so the accumulator holds partial JSON strings
+/// and only parses them at the end. Text is handed out as it arrives, because
+/// that is the entire point; everything else is reconstructed into the same
+/// [`Completion`] the non-streaming path returns, so nothing downstream has to
+/// know which path it came from.
+pub struct StreamState {
+    provider: AiProvider,
+    text: String,
+    reasoning: String,
+    /// Tool calls under construction, in the order the provider introduced them.
+    /// `arguments` is raw JSON text until [`StreamState::finish`].
+    partial: Vec<PartialCall>,
+    /// Anthropic and the Responses API address fragments by index rather than by
+    /// repeating the id; this maps their index onto ours.
+    by_index: std::collections::HashMap<i64, usize>,
+    done: bool,
+}
+
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamState {
+    pub fn new(provider: AiProvider) -> StreamState {
+        StreamState {
+            provider,
+            text: String::new(),
+            reasoning: String::new(),
+            partial: Vec::new(),
+            by_index: std::collections::HashMap::new(),
+            done: false,
+        }
+    }
+
+    /// True once the provider has said the response is over. A stream that ends
+    /// without this is a dropped connection, which the caller reports.
+    pub fn finished(&self) -> bool {
+        self.done
+    }
+
+    /// Feed one SSE `data:` payload. Returns the text to append to the answer,
+    /// which is empty for everything that is not prose.
+    pub fn feed(&mut self, payload: &str) -> String {
+        let payload = payload.trim();
+        if payload.is_empty() {
+            return String::new();
+        }
+        // OpenAI ends with a literal sentinel rather than a JSON event.
+        if payload == "[DONE]" {
+            self.done = true;
+            return String::new();
+        }
+        let Ok(v) = serde_json::from_str::<Value>(payload) else {
+            // A partial or non-JSON line is not worth failing a whole answer
+            // over; the stream will either recover or end without `done`.
+            return String::new();
+        };
+        match self.provider {
+            AiProvider::OpenaiCompatible => self.feed_openai(&v),
+            AiProvider::OpenaiResponses => self.feed_responses(&v),
+            AiProvider::Anthropic => self.feed_anthropic(&v),
+            AiProvider::Gemini => self.feed_gemini(&v),
+        }
+    }
+
+    /// `choices[0].delta` carries `content`, sometimes `reasoning_content`, and
+    /// `tool_calls` whose `function.arguments` arrive in fragments.
+    fn feed_openai(&mut self, v: &Value) -> String {
+        let choice = &v["choices"][0];
+        if choice["finish_reason"].is_string() {
+            self.done = true;
+        }
+        let delta = &choice["delta"];
+
+        for r in ["reasoning_content", "reasoning"] {
+            if let Some(chunk) = delta[r].as_str() {
+                self.reasoning.push_str(chunk);
+            }
+        }
+
+        for call in delta["tool_calls"].as_array().into_iter().flatten() {
+            let index = call["index"].as_i64().unwrap_or(0);
+            let slot = self.slot_for(index);
+            if let Some(id) = call["id"].as_str() {
+                if !id.is_empty() {
+                    self.partial[slot].id = id.to_string();
+                }
+            }
+            if let Some(name) = call["function"]["name"].as_str() {
+                self.partial[slot].name.push_str(name);
+            }
+            if let Some(args) = call["function"]["arguments"].as_str() {
+                self.partial[slot].arguments.push_str(args);
+            }
+        }
+
+        let chunk = delta["content"].as_str().unwrap_or_default();
+        self.text.push_str(chunk);
+        chunk.to_string()
+    }
+
+    /// The Responses API names every event. Only four of them carry payload we
+    /// want; the rest describe structure we rebuild anyway.
+    fn feed_responses(&mut self, v: &Value) -> String {
+        match v["type"].as_str() {
+            Some("response.output_text.delta") => {
+                let chunk = v["delta"].as_str().unwrap_or_default();
+                self.text.push_str(chunk);
+                return chunk.to_string();
+            }
+            Some("response.reasoning_summary_text.delta") => {
+                self.reasoning.push_str(v["delta"].as_str().unwrap_or_default());
+            }
+            Some("response.output_item.added") => {
+                if v["item"]["type"].as_str() == Some("function_call") {
+                    let index = v["output_index"].as_i64().unwrap_or(0);
+                    let slot = self.slot_for(index);
+                    self.partial[slot].id = v["item"]["call_id"]
+                        .as_str()
+                        .or_else(|| v["item"]["id"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    self.partial[slot].name =
+                        v["item"]["name"].as_str().unwrap_or_default().to_string();
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                let index = v["output_index"].as_i64().unwrap_or(0);
+                let slot = self.slot_for(index);
+                self.partial[slot].arguments.push_str(v["delta"].as_str().unwrap_or_default());
+            }
+            Some("response.completed" | "response.incomplete" | "response.failed") => {
+                self.done = true;
+            }
+            _ => {}
+        }
+        String::new()
+    }
+
+    /// Anthropic streams blocks: `content_block_start` says what kind, then
+    /// `content_block_delta` fills it in — `text_delta`, `thinking_delta`, or
+    /// `input_json_delta` for a tool's arguments.
+    fn feed_anthropic(&mut self, v: &Value) -> String {
+        match v["type"].as_str() {
+            Some("content_block_start") => {
+                if v["content_block"]["type"].as_str() == Some("tool_use") {
+                    let index = v["index"].as_i64().unwrap_or(0);
+                    let slot = self.slot_for(index);
+                    self.partial[slot].id =
+                        v["content_block"]["id"].as_str().unwrap_or_default().to_string();
+                    self.partial[slot].name =
+                        v["content_block"]["name"].as_str().unwrap_or_default().to_string();
+                }
+            }
+            Some("content_block_delta") => {
+                let delta = &v["delta"];
+                match delta["type"].as_str() {
+                    Some("text_delta") => {
+                        let chunk = delta["text"].as_str().unwrap_or_default();
+                        self.text.push_str(chunk);
+                        return chunk.to_string();
+                    }
+                    Some("thinking_delta") => {
+                        self.reasoning.push_str(delta["thinking"].as_str().unwrap_or_default());
+                    }
+                    Some("input_json_delta") => {
+                        let index = v["index"].as_i64().unwrap_or(0);
+                        let slot = self.slot_for(index);
+                        self.partial[slot]
+                            .arguments
+                            .push_str(delta["partial_json"].as_str().unwrap_or_default());
+                    }
+                    _ => {}
+                }
+            }
+            Some("message_stop") => self.done = true,
+            _ => {}
+        }
+        String::new()
+    }
+
+    /// Gemini streams whole `candidates` objects, so each event is a small
+    /// version of the non-streaming body and a function call never fragments.
+    fn feed_gemini(&mut self, v: &Value) -> String {
+        let mut out = String::new();
+        for part in v["candidates"][0]["content"]["parts"].as_array().into_iter().flatten() {
+            if let Some(t) = part["text"].as_str() {
+                // Gemini marks a reasoning part rather than putting it elsewhere.
+                if part["thought"].as_bool() == Some(true) {
+                    self.reasoning.push_str(t);
+                } else {
+                    self.text.push_str(t);
+                    out.push_str(t);
+                }
+            }
+            if let Some(call) = part.get("functionCall") {
+                let name = call["name"].as_str().unwrap_or_default().to_string();
+                self.partial.push(PartialCall {
+                    id: format!("gemini-{name}-{}", self.partial.len()),
+                    name,
+                    // Whole, not fragmented — stored as text for one exit path.
+                    arguments: call["args"].to_string(),
+                });
+            }
+        }
+        if v["candidates"][0]["finishReason"].is_string() {
+            self.done = true;
+        }
+        out
+    }
+
+    fn slot_for(&mut self, index: i64) -> usize {
+        if let Some(&slot) = self.by_index.get(&index) {
+            return slot;
+        }
+        let slot = self.partial.len();
+        self.partial.push(PartialCall {
+            id: String::new(),
+            name: String::new(),
+            arguments: String::new(),
+        });
+        self.by_index.insert(index, slot);
+        slot
+    }
+
+    /// The finished round, in the same shape the non-streaming path produces.
+    pub fn finish(self) -> Completion {
+        let calls = self
+            .partial
+            .into_iter()
+            .filter(|p| !p.name.is_empty())
+            .map(|p| ToolInvocation {
+                id: if p.id.is_empty() { p.name.clone() } else { p.id },
+                // A model that streamed broken JSON must not lose the whole
+                // answer; the tool reports its own missing arguments.
+                arguments: serde_json::from_str(p.arguments.trim())
+                    .unwrap_or_else(|_| json!({})),
+                name: p.name,
+            })
+            .collect();
+
+        // Same treatment as a whole response: a chain of thought inside the text
+        // is thinking, not the answer.
+        let (reasoning, text) = super::split_reasoning(&self.text);
+        Completion {
+            text,
+            reasoning: reasoning
+                .or_else(|| (!self.reasoning.trim().is_empty()).then_some(self.reasoning)),
+            calls,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,5 +1054,204 @@ mod tests {
         let c = parse_completion(AiProvider::OpenaiCompatible, raw).unwrap();
         assert_eq!(c.reasoning.unwrap(), "推理过程");
         assert_eq!(c.text, "答案");
+    }
+
+    // -- streaming -----------------------------------------------------------
+
+    /// Feed a state machine a list of payloads and report what the user saw plus
+    /// what the round turned out to be.
+    fn stream(provider: AiProvider, payloads: &[&str]) -> (String, Completion, bool) {
+        let mut st = StreamState::new(provider);
+        let mut seen = String::new();
+        for p in payloads {
+            seen.push_str(&st.feed(p));
+        }
+        let done = st.finished();
+        (seen, st.finish(), done)
+    }
+
+    /// The common case, and the one every OpenAI-compatible server speaks: text
+    /// in `delta.content`, ending with a literal sentinel rather than JSON.
+    #[test]
+    fn openai_text_arrives_in_fragments() {
+        let (seen, c, done) = stream(
+            AiProvider::OpenaiCompatible,
+            &[
+                r#"{"choices":[{"delta":{"role":"assistant","content":"你有"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"两封"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"账单。"},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ],
+        );
+        assert_eq!(seen, "你有两封账单。", "the user sees every fragment, in order");
+        assert_eq!(c.text, "你有两封账单。");
+        assert!(c.calls.is_empty());
+        assert!(done);
+    }
+
+    /// Tool arguments arrive as JSON split at arbitrary points — the reason the
+    /// accumulator holds text and parses once at the end.
+    #[test]
+    fn openai_tool_arguments_are_reassembled_from_fragments() {
+        let (seen, c, done) = stream(
+            AiProvider::OpenaiCompatible,
+            &[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search_mail","arguments":""}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"query\":\"账"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"单\"}"}}]}}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "[DONE]",
+            ],
+        );
+        assert!(seen.is_empty(), "a tool call is not prose");
+        assert!(done);
+        assert_eq!(c.calls.len(), 1);
+        assert_eq!(c.calls[0].id, "call_1");
+        assert_eq!(c.calls[0].name, "search_mail");
+        assert_eq!(c.calls[0].arguments["query"], "账单");
+    }
+
+    /// Two tools in one round are addressed by index, and their fragments
+    /// interleave.
+    #[test]
+    fn openai_keeps_two_interleaved_tool_calls_apart() {
+        let (_, c, _) = stream(
+            AiProvider::OpenaiCompatible,
+            &[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"recent_mail","arguments":"{"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"list_accounts","arguments":"{"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"}"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"limit\":3}"}}]}}]}"#,
+            ],
+        );
+        assert_eq!(c.calls.len(), 2);
+        assert_eq!(c.calls[0].name, "recent_mail");
+        assert_eq!(c.calls[0].arguments["limit"], 3);
+        assert_eq!(c.calls[1].name, "list_accounts");
+    }
+
+    /// Anthropic streams typed blocks; the tool's arguments come as
+    /// `input_json_delta` under the same index the block was opened with.
+    #[test]
+    fn anthropic_blocks_become_text_thinking_and_tools() {
+        let (seen, c, done) = stream(
+            AiProvider::Anthropic,
+            &[
+                r#"{"type":"message_start","message":{"id":"m"}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先查一下"}}"#,
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text"}}"#,
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"共 2 封"}}"#,
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"search_mail"}}"#,
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#,
+                r#"{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"\"bill\"}"}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+                r#"{"type":"message_stop"}"#,
+            ],
+        );
+        assert_eq!(seen, "共 2 封", "only text_delta reaches the user");
+        assert!(done);
+        assert_eq!(c.reasoning.as_deref(), Some("先查一下"));
+        assert_eq!(c.calls.len(), 1);
+        assert_eq!(c.calls[0].id, "toolu_1");
+        assert_eq!(c.calls[0].arguments["query"], "bill");
+    }
+
+    /// The Responses API names its events; only some of them carry payload.
+    #[test]
+    fn the_responses_api_events_are_read_by_name() {
+        let (seen, c, done) = stream(
+            AiProvider::OpenaiResponses,
+            &[
+                r#"{"type":"response.created"}"#,
+                r#"{"type":"response.reasoning_summary_text.delta","delta":"想一下"}"#,
+                r#"{"type":"response.output_text.delta","delta":"账单"}"#,
+                r#"{"type":"response.output_text.delta","delta":"两封"}"#,
+                r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"fc_1","name":"read_message"}}"#,
+                r#"{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"message_id\""}"#,
+                r#"{"type":"response.function_call_arguments.delta","output_index":1,"delta":":\"m1\"}"}"#,
+                r#"{"type":"response.completed"}"#,
+            ],
+        );
+        assert_eq!(seen, "账单两封");
+        assert!(done);
+        assert_eq!(c.reasoning.as_deref(), Some("想一下"));
+        assert_eq!(c.calls[0].id, "fc_1");
+        assert_eq!(c.calls[0].arguments["message_id"], "m1");
+    }
+
+    /// Gemini streams a small version of the whole body per event, so a function
+    /// call never fragments and thinking is a flag on a text part.
+    #[test]
+    fn gemini_streams_whole_parts() {
+        let (seen, c, done) = stream(
+            AiProvider::Gemini,
+            &[
+                r#"{"candidates":[{"content":{"parts":[{"text":"在想","thought":true}]}}]}"#,
+                r#"{"candidates":[{"content":{"parts":[{"text":"有 2 封"}]}}]}"#,
+                r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search_mail","args":{"query":"账单"}}}]},"finishReason":"STOP"}]}"#,
+            ],
+        );
+        assert_eq!(seen, "有 2 封");
+        assert!(done);
+        assert_eq!(c.reasoning.as_deref(), Some("在想"));
+        assert_eq!(c.calls[0].name, "search_mail");
+        assert_eq!(c.calls[0].arguments["query"], "账单");
+    }
+
+    /// Streams carry keep-alives, unparseable fragments and events we do not
+    /// use. None of them may take an answer down.
+    #[test]
+    fn noise_in_the_stream_is_survivable() {
+        let (seen, c, done) = stream(
+            AiProvider::OpenaiCompatible,
+            &[
+                "",
+                ": ping",
+                "{not json",
+                r#"{"choices":[{"delta":{"content":"ok"}}]}"#,
+            ],
+        );
+        assert_eq!(seen, "ok");
+        assert_eq!(c.text, "ok");
+        assert!(!done, "nothing said the response was over");
+    }
+
+    /// A model that streams a chain of thought inside the text gets the same
+    /// treatment as one that answers all at once.
+    #[test]
+    fn reasoning_inside_streamed_text_is_still_separated() {
+        let (seen, c, _) = stream(
+            AiProvider::OpenaiCompatible,
+            &[
+                r#"{"choices":[{"delta":{"content":"<think>先查"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"一下</think>有 2 封"}}]}"#,
+            ],
+        );
+        assert!(seen.contains("<think>"), "the raw fragments are what streamed");
+        assert_eq!(c.text, "有 2 封", "but the stored answer is the answer");
+        assert_eq!(c.reasoning.as_deref(), Some("先查一下"));
+    }
+
+    /// Only Gemini changes the URL; the others take a flag in the body.
+    #[test]
+    fn asking_for_a_stream_is_per_provider() {
+        let mut body = json!({"model": "x"});
+        let url = make_streaming(
+            AiProvider::OpenaiCompatible,
+            &mut body,
+            "https://api.openai.com/v1/chat/completions",
+        );
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(body["stream"], true);
+
+        let mut body = json!({});
+        let url = make_streaming(
+            AiProvider::Gemini,
+            &mut body,
+            "https://x/v1beta/models/gemini-2.5-flash:generateContent?key=K",
+        );
+        assert_eq!(url, "https://x/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=K");
+        assert!(body.get("stream").is_none(), "Gemini has no such field");
     }
 }

@@ -1,8 +1,14 @@
 /**
- * The assistant panel — ask the mailbox questions in plain language.
+ * The assistant — ask the mailbox questions in plain language.
  *
  * Everything it can do already exists in the backend (retrieval over the
  * embedding index, memory, the shared tool layer); this is the door.
+ *
+ * It floats over the app instead of taking a column in it: as a fourth pane it
+ * squeezed the reading pane until long subjects wrapped one character per line,
+ * and a conversation about your mail is something you dip into and dismiss, not
+ * a permanent third of the window. Closed, it collapses to a launcher in the
+ * corner, the way a site's chat widget does.
  *
  * Two things are deliberate:
  *  - Sending mail is never done on the model's word. When the assistant wants
@@ -13,8 +19,9 @@
  *    message is clickable straight into the reading pane.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import { renderRichText } from "../lib/richText";
 import { formatDate, useApp } from "../lib/store";
 import type { ChatTurn, PendingAction, SearchHit } from "../lib/types";
 import { Icon } from "./Icon";
@@ -36,19 +43,57 @@ export function Assistant() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingAction | null>(null);
+  /** The answer as it is being written, before the finished turn arrives. */
+  const [draft, setDraft] = useState("");
+
+  // The conversation this panel is currently waiting on. A ref because the
+  // listener is registered once and must see the current value, not the one
+  // captured when it was set up.
+  const askingRef = useRef<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Follow the conversation as it grows.
+  // Follow the conversation as it grows — including while an answer is being
+  // written, which is the whole point of streaming it.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [turns, busy, pending]);
+  }, [turns, busy, pending, draft]);
+
+  // Fragments of the answer, pushed from the backend as the model writes them.
+  // Registered once for the life of the panel; `askingRef` decides what to keep.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void api
+      .onAssistantDelta((d) => {
+        // A new conversation's id is minted by the backend, so the first answer
+        // of a thread arrives tagged with an id this panel has not seen yet.
+        // Anything while we are waiting is ours; anything else is not.
+        if (askingRef.current === null) return;
+        if (askingRef.current !== "" && d.conversationId !== askingRef.current) return;
+        setDraft((t) => t + d.text);
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     if (assistantOpen) inputRef.current?.focus();
   }, [assistantOpen]);
+
+  // Grow with the text, up to the cap the stylesheet sets, then scroll. A
+  // textarea has no intrinsic sizing, so this is the only way to have one line
+  // occupy one line.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input]);
 
   const ask = useCallback(
     async (text: string) => {
@@ -70,9 +115,13 @@ export function Assistant() {
       setTurns((t) => [...t, optimistic]);
       setInput("");
       setBusy(true);
+      setDraft("");
+      askingRef.current = conversationId ?? "";
       try {
         const reply = await api.assistantAsk(conversationId, question);
         setConversationId(reply.turn.conversationId);
+        // Replace rather than keep: the streamed text may include prose from a
+        // round that then called a tool, and the stored turn is the answer.
         setTurns((t) => [...t, reply.turn]);
         setPending(reply.pendingConfirmation ?? null);
       } catch (e) {
@@ -81,6 +130,8 @@ export function Assistant() {
         setInput(question);
         pushToast("error", `助手出错: ${e}`);
       } finally {
+        askingRef.current = null;
+        setDraft("");
         setBusy(false);
       }
     },
@@ -109,7 +160,21 @@ export function Assistant() {
     inputRef.current?.focus();
   }, []);
 
-  if (!assistantOpen) return null;
+  // Closed, the assistant is a launcher parked in the corner — the live-chat
+  // convention, and the one place on screen nothing else competes for.
+  if (!assistantOpen) {
+    return (
+      <button
+        className="asst-launcher"
+        onClick={() => setAssistantOpen(true)}
+        title="AI 助手（Ctrl/⌘ + J）"
+        aria-label="打开 AI 助手"
+      >
+        <Icon name="spark" size={20} />
+        {turns.length > 0 && <span className="asst-launcher-dot" aria-hidden />}
+      </button>
+    );
+  }
 
   return (
     <aside className="asst" aria-label="AI 助手">
@@ -131,10 +196,10 @@ export function Assistant() {
           <button
             className="icon-btn"
             onClick={() => setAssistantOpen(false)}
-            title="关闭助手"
-            aria-label="关闭助手"
+            title="收起助手"
+            aria-label="收起助手"
           >
-            <Icon name="x" size={16} />
+            <Icon name="chevron-down" size={16} />
           </button>
         </div>
       </header>
@@ -157,10 +222,20 @@ export function Assistant() {
           turns.map((t) => <Turn key={t.id} turn={t} onOpen={select} />)
         )}
 
+        {/* The answer as it is written. Rendered as plain text with a cursor
+            rather than as Markdown: half a fence or half a table is not valid
+            Markdown, and re-parsing it on every fragment would make the panel
+            flicker between interpretations. The finished turn is rendered. */}
+        {busy && draft && (
+          <div className="asst-turn">
+            <div className="asst-stream">{draft}</div>
+          </div>
+        )}
+
         {busy && (
           <p className="asst-thinking">
             <Icon name="loader" size={14} className="asst-spin" />
-            正在查阅邮件…
+            {draft ? "正在作答…" : "正在查阅邮件…"}
           </p>
         )}
 
@@ -174,6 +249,10 @@ export function Assistant() {
         )}
       </div>
 
+      {/* One rounded field with the button inside it, growing with the text up to
+          a few lines. The two-box version put a fixed 2-row textarea beside a
+          square button, so a one-line question sat in a box built for two and a
+          long one scrolled inside three. */}
       <form
         className="asst-composer"
         onSubmit={(e) => {
@@ -181,29 +260,32 @@ export function Assistant() {
           void ask(input);
         }}
       >
-        <textarea
-          ref={inputRef}
-          className="asst-input"
-          value={input}
-          rows={2}
-          placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"
-          disabled={busy}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void ask(input);
-            }
-          }}
-        />
-        <button
-          type="submit"
-          className="btn btn-primary asst-send"
-          disabled={busy || !input.trim()}
-          aria-label="发送"
-        >
-          <Icon name="send" size={15} />
-        </button>
+        <div className="asst-field">
+          <textarea
+            ref={inputRef}
+            className="asst-input"
+            value={input}
+            rows={1}
+            placeholder="问点什么…"
+            disabled={busy}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void ask(input);
+              }
+            }}
+          />
+          <button
+            type="submit"
+            className="asst-send"
+            disabled={busy || !input.trim()}
+            title="发送（Enter，Shift+Enter 换行）"
+            aria-label="发送"
+          >
+            <Icon name={busy ? "loader" : "send"} size={15} className={busy ? "mv-spin" : undefined} />
+          </button>
+        </div>
       </form>
     </aside>
   );
@@ -234,10 +316,27 @@ function Turn({ turn, onOpen }: { turn: ChatTurn; onOpen: (id: string) => void }
         </ul>
       )}
 
-      <div className="asst-answer">{turn.content}</div>
+      <Answer text={turn.content} />
 
       {turn.citations.length > 0 && <Citations hits={turn.citations} onOpen={onOpen} />}
     </div>
+  );
+}
+
+/**
+ * The answer itself, as Markdown and LaTeX.
+ *
+ * `renderRichText` is the only thing allowed to produce this markup, and it
+ * sanitizes on the way out — the text is written by a model that has been
+ * reading mail from strangers.
+ */
+function Answer({ text }: { text: string }) {
+  const html = useMemo(() => renderRichText(text), [text]);
+  return (
+    <div
+      className="asst-answer"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 

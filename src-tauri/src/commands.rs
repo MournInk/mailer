@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use mailer_core::mail::{imap, pop3, smtp};
 use mailer_core::sync::{now_ms, SyncEngine};
 use mailer_core::types::*;
-use mailer_core::{ai, assistant, notify, rag};
+use mailer_core::{ai, assistant, mcp, memory, notify, rag};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -18,6 +18,9 @@ type CmdResult<T> = Result<T, String>;
 /// Messages embedded per backfill round trip. Small enough that a failure costs
 /// one request, large enough that a 5000-mail mailbox is not 5000 round trips.
 const INDEX_BATCH: u32 = 32;
+/// Starred messages deep-indexed per round trip. Smaller than `INDEX_BATCH`
+/// because each one is many chunks, not one vector.
+const DEEP_BATCH: u32 = 6;
 /// Conversations listed when the caller does not ask for a number.
 const DEFAULT_CONVERSATIONS: u32 = 100;
 const MAX_CONVERSATIONS: u32 = 500;
@@ -25,6 +28,8 @@ const MAX_CONVERSATIONS: u32 = 500;
 const MAX_PENDING: usize = 32;
 /// Progress of the embedding backfill, pushed as it runs.
 const INDEX_EVENT: &str = "mailer://index-status";
+/// Fragments of an assistant answer, pushed as the model writes them.
+const ASSISTANT_DELTA_EVENT: &str = "mailer://assistant-delta";
 
 /// Which OS the shell is running on, so the frontend knows whether to draw its
 /// own window controls. Windows and Linux run undecorated and get ours; macOS
@@ -230,7 +235,13 @@ fn protocol_label(p: Protocol) -> &'static str {
 
 #[tauri::command]
 pub fn list_messages(state: State<'_, AppState>, query: MessageQuery) -> CmdResult<MessagePage> {
-    state.engine.store().query_messages(&query).map_err(err_str)
+    let store = state.engine.store();
+    // Grouping is the stored preference, not something the caller gets to
+    // decide per request. The window reads the same setting to know how to
+    // render a row, and if the two could disagree the list would show
+    // collapsed counts on rows that are not collapsed.
+    let group_threads = store.reading_settings().map(|s| s.group_threads).unwrap_or(true);
+    store.query_messages(&MessageQuery { group_threads, ..query }).map_err(err_str)
 }
 
 #[tauri::command]
@@ -248,14 +259,29 @@ pub fn set_starred(state: State<'_, AppState>, id: String, starred: bool) -> Cmd
     state.engine.store().set_starred(&id, starred).map_err(err_str)
 }
 
+/// Star or unstar a whole selection.
+#[tauri::command]
+pub fn set_starred_many(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    starred: bool,
+) -> CmdResult<()> {
+    state.engine.store().set_starred_many(&ids, starred).map_err(err_str)
+}
+
+/// Delete messages, reporting what actually went.
+///
+/// The list hides the rows before this is called, so the report is how it learns
+/// which ones to put back: a server that refused the delete still has the mail,
+/// and pretending otherwise would make it reappear at the next sync as if from
+/// nowhere.
 #[tauri::command]
 pub async fn delete_messages(
     state: State<'_, AppState>,
     ids: Vec<String>,
     on_server: bool,
-) -> CmdResult<()> {
-    state.engine.delete_messages(&ids, on_server).await;
-    Ok(())
+) -> CmdResult<DeleteReport> {
+    Ok(state.engine.delete_messages(&ids, on_server).await)
 }
 
 /// Trigger sync for one account, or all accounts when `account_id` is None.
@@ -429,6 +455,8 @@ async fn send_outgoing(engine: &SyncEngine, mail: &OutgoingMail) -> CmdResult<()
     smtp::send(
         &account,
         &mail.to,
+        &mail.cc,
+        &mail.bcc,
         &mail.subject,
         &mail.body,
         in_reply_to.as_deref(),
@@ -562,6 +590,577 @@ pub fn set_reranker_settings(
 }
 
 // ---------------------------------------------------------------------------
+// User-defined labels
+// ---------------------------------------------------------------------------
+
+/// A label is a name plus a sentence; the sentence is the whole feature, so it
+/// is the one field with a real minimum.
+const MIN_INSTRUCTION_CHARS: usize = 4;
+/// Labels one mailbox may define. Each one is prompt text on every message that
+/// arrives, so the ceiling is a cost ceiling, not a storage one.
+const MAX_LABELS: usize = 20;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelInput {
+    /// None → create.
+    pub id: Option<String>,
+    pub name: String,
+    pub instruction: String,
+    pub color_hue: u16,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub fn list_labels(state: State<'_, AppState>) -> CmdResult<Vec<MailLabel>> {
+    state.engine.store().list_labels().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn label_counts(state: State<'_, AppState>) -> CmdResult<Vec<LabelCount>> {
+    state.engine.store().label_counts().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn save_label(state: State<'_, AppState>, input: LabelInput) -> CmdResult<Vec<MailLabel>> {
+    let store = state.engine.store();
+    let name = input.name.trim().to_string();
+    let instruction = input.instruction.trim().to_string();
+    if name.is_empty() {
+        return Err("请给标签起一个名字".into());
+    }
+    if instruction.chars().count() < MIN_INSTRUCTION_CHARS {
+        return Err("请描述一下什么样的邮件属于这个标签，模型要靠这句话判断".into());
+    }
+
+    let mut labels = store.list_labels().map_err(err_str)?;
+    let existing = input
+        .id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| labels.iter().position(|l| l.id == id));
+    if existing.is_none() && labels.len() >= MAX_LABELS {
+        return Err(format!("最多 {MAX_LABELS} 个标签"));
+    }
+    // The name is what the model answers with, so two labels sharing one would
+    // make the answer ambiguous and attach mail to both.
+    if labels
+        .iter()
+        .enumerate()
+        .any(|(i, l)| Some(i) != existing && l.name.trim().eq_ignore_ascii_case(&name))
+    {
+        return Err(format!("已经有一个叫「{name}」的标签了"));
+    }
+
+    let label = MailLabel {
+        id: existing
+            .map(|i| labels[i].id.clone())
+            .unwrap_or_else(new_id),
+        name,
+        instruction,
+        color_hue: input.color_hue.min(360),
+        enabled: input.enabled,
+        created_at: existing.map(|i| labels[i].created_at).unwrap_or_else(now_ms),
+    };
+    store.put_label(&label).map_err(err_str)?;
+    match existing {
+        Some(i) => labels[i] = label,
+        None => labels.push(label),
+    }
+    Ok(labels)
+}
+
+#[tauri::command]
+pub fn delete_label(state: State<'_, AppState>, id: String) -> CmdResult<Vec<MailLabel>> {
+    let store = state.engine.store();
+    store.delete_label(&id).map_err(err_str)?;
+    store.list_labels().map_err(err_str)
+}
+
+// ---------------------------------------------------------------------------
+// Trackers
+// ---------------------------------------------------------------------------
+
+/// Days the privacy screen draws. Ten weeks is enough for a pattern to be visible
+/// and short enough to fit a settings card without scrolling sideways.
+const TRACKER_DAYS: i64 = 70;
+/// Hosts named in the "worst offenders" list.
+const TRACKER_TOP: u32 = 8;
+/// Messages scanned per pass during the backfill.
+const TRACKER_BATCH: u32 = 200;
+
+#[tauri::command]
+pub fn get_privacy_settings(state: State<'_, AppState>) -> CmdResult<PrivacySettings> {
+    state.engine.store().privacy_settings().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn set_privacy_settings(
+    state: State<'_, AppState>,
+    input: PrivacySettings,
+) -> CmdResult<PrivacySettings> {
+    let store = state.engine.store();
+    store.set_privacy_settings(&input).map_err(err_str)?;
+    Ok(input)
+}
+
+#[tauri::command]
+pub fn get_reading_settings(state: State<'_, AppState>) -> CmdResult<ReadingSettings> {
+    state.engine.store().reading_settings().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn set_reading_settings(
+    state: State<'_, AppState>,
+    input: ReadingSettings,
+) -> CmdResult<ReadingSettings> {
+    state.engine.store().set_reading_settings(&input).map_err(err_str)?;
+    Ok(input)
+}
+
+/// How the compose window should be opened for a reply or a forward.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftPrefill {
+    pub account_id: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+}
+
+/// What replying to (or forwarding) one message should put in the composer.
+///
+/// Built here rather than in the window because the recipient set is the part
+/// that can be silently wrong — see `mailer_core::reply`. `kind` is one of
+/// `reply`, `reply_all`, `forward`.
+#[tauri::command]
+pub fn prepare_draft(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    when: String,
+) -> CmdResult<DraftPrefill> {
+    let store = state.engine.store();
+    let msg = store.get_message(&id).map_err(err_str)?;
+
+    // Every address this user owns, across all accounts — a reply must not go
+    // to another of their own mailboxes either.
+    let mine: Vec<String> = store
+        .list_accounts()
+        .map_err(err_str)?
+        .into_iter()
+        .flat_map(|a| [a.email, a.username])
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    let forwarding = kind == "forward";
+    let recipients = if forwarding {
+        mailer_core::reply::Recipients::default()
+    } else {
+        mailer_core::reply::reply_recipients(&msg, &mine, kind == "reply_all")
+    };
+
+    Ok(DraftPrefill {
+        account_id: msg.account_id.clone(),
+        to: recipients.to,
+        cc: recipients.cc,
+        subject: if forwarding {
+            mailer_core::reply::forward_subject(&msg.subject)
+        } else {
+            mailer_core::reply::reply_subject(&msg.subject)
+        },
+        body: if forwarding {
+            mailer_core::reply::forward_body(&msg, &when)
+        } else {
+            mailer_core::reply::reply_body(&msg, &when)
+        },
+        // A forward starts a new conversation; a reply continues one.
+        in_reply_to: (!forwarding).then(|| msg.id.clone()),
+    })
+}
+
+/// Mark a whole conversation read — what opening a collapsed row means.
+#[tauri::command]
+pub fn mark_thread_read(
+    state: State<'_, AppState>,
+    thread_id: String,
+    read: bool,
+) -> CmdResult<u32> {
+    state.engine.store().set_thread_read(&thread_id, read).map_err(err_str)
+}
+
+/// Every message in one conversation, oldest first.
+#[tauri::command]
+pub fn thread_messages(state: State<'_, AppState>, thread_id: String) -> CmdResult<Vec<EmailMessage>> {
+    state.engine.store().thread_messages(&thread_id).map_err(err_str)
+}
+
+/// What one message wanted to load from somebody else's server.
+#[tauri::command]
+pub fn message_trackers(state: State<'_, AppState>, id: String) -> CmdResult<Vec<TrackerHit>> {
+    state.engine.store().trackers_for(&id).map_err(err_str)
+}
+
+/// The heatmap, the worst offenders, and the totals behind them.
+///
+/// Every day in the window is present whether or not anything happened on it: a
+/// calendar with holes in it is not a calendar, and the store only returns the
+/// days it has rows for.
+#[tauri::command]
+pub fn tracker_stats(state: State<'_, AppState>) -> CmdResult<TrackerStats> {
+    let store = state.engine.store();
+    let today = now_ms();
+    let day_ms = 86_400_000i64;
+    let since = mailer_core::sync::local_day(today - (TRACKER_DAYS - 1) * day_ms);
+
+    let found = store.tracker_days(&since).map_err(err_str)?;
+    let by_day: std::collections::HashMap<String, &TrackerDay> =
+        found.iter().map(|d| (d.day.clone(), d)).collect();
+
+    let mut days = Vec::with_capacity(TRACKER_DAYS as usize);
+    for back in (0..TRACKER_DAYS).rev() {
+        let day = mailer_core::sync::local_day(today - back * day_ms);
+        days.push(match by_day.get(&day) {
+            Some(d) => (*d).clone(),
+            None => TrackerDay { day, blocked: 0, messages: 0 },
+        });
+    }
+
+    Ok(TrackerStats {
+        blocked: days.iter().map(|d| d.blocked).sum(),
+        messages: days.iter().map(|d| d.messages).sum(),
+        top: store.tracker_top(&since, TRACKER_TOP).map_err(err_str)?,
+        days,
+    })
+}
+
+/// Scan mail that arrived before the scanner did.
+///
+/// Same shape as the text-index backfill: local, bounded, yielding, and measured
+/// rather than assumed so a message that cannot be scanned cannot loop.
+pub async fn backfill_trackers(engine: std::sync::Arc<SyncEngine>) {
+    let store = engine.store();
+    loop {
+        let batch = match store.messages_missing_trackers(TRACKER_BATCH) {
+            Ok(batch) => batch,
+            Err(e) => {
+                tracing::warn!("tracker scan: 读取待扫描邮件失败: {e}");
+                return;
+            }
+        };
+        if batch.is_empty() {
+            return;
+        }
+        tracing::info!("tracker scan: 正在扫描 {} 封旧邮件", batch.len());
+        for msg in &batch {
+            engine.scan_trackers(msg);
+        }
+        // `scan_trackers` swallows its own failures, so progress is checked here:
+        // a batch that comes back unchanged would otherwise repeat forever.
+        match store.messages_missing_trackers(1) {
+            Ok(next) if next.first().map(|m| m.id.as_str()) == batch.first().map(|m| m.id.as_str()) => {
+                tracing::warn!("tracker scan: 无法扫描 {}，已停止", batch[0].id);
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Threading
+// ---------------------------------------------------------------------------
+
+/// Messages threaded per pass. Each one is a couple of indexed lookups, but the
+/// batch holds the store mutex, so it stays short enough not to be felt.
+const THREAD_BATCH: u32 = 300;
+
+/// Thread whatever arrived before threading existed, then stop.
+///
+/// New mail is threaded on insert, so this only has work to do once — on the
+/// first launch after the upgrade that added the columns. Bounded and measured
+/// like the other backfills: a batch that fails to shrink means something in it
+/// cannot be threaded, and repeating it forever would be worse than stopping.
+pub async fn backfill_threads(engine: std::sync::Arc<SyncEngine>) {
+    let store = engine.store();
+    let mut left = match store.unthreaded_count() {
+        Ok(0) => return,
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("threading: 读取待处理邮件数失败: {e}");
+            return;
+        }
+    };
+    tracing::info!("threading: 正在整理 {left} 封旧邮件的会话");
+    loop {
+        match store.backfill_threads(THREAD_BATCH) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("threading: 整理失败: {e}");
+                return;
+            }
+        }
+        let now = match store.unthreaded_count() {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        if now >= left {
+            tracing::warn!("threading: 还剩 {now} 封无法整理，已停止");
+            return;
+        }
+        left = now;
+        tokio::task::yield_now().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full-text index
+// ---------------------------------------------------------------------------
+
+/// Messages indexed per pass. The work is local and fast, but it holds the store
+/// mutex for the batch, so it is kept short enough not to be felt in the UI.
+const TEXT_BATCH: u32 = 200;
+
+/// Index whatever the full-text index has not seen yet, then stop.
+///
+/// New mail is indexed as it lands, so this only ever has work to do on a
+/// database written by a build that predates the index. Yields between batches:
+/// a 20 000-message mailbox is a few seconds of work and the window has to stay
+/// responsive through it.
+pub async fn backfill_text_index(engine: std::sync::Arc<SyncEngine>) {
+    let store = engine.store();
+    let (indexed, total) = match store.fts_counts() {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("text index: 无法读取索引状态: {e}");
+            return;
+        }
+    };
+    if indexed >= total {
+        return;
+    }
+    tracing::info!("text index: 正在补全 {} 封旧邮件的全文索引", total - indexed);
+
+    let mut done = indexed;
+    loop {
+        let batch = match store.messages_missing_fts(TEXT_BATCH) {
+            Ok(batch) => batch,
+            Err(e) => {
+                tracing::warn!("text index: 读取待索引邮件失败: {e}");
+                return;
+            }
+        };
+        if batch.is_empty() {
+            break;
+        }
+        for msg in &batch {
+            if let Err(e) = store.index_message_text(msg) {
+                // One unindexable message must not take the pass down with it.
+                tracing::warn!("text index: {} 索引失败: {e}", msg.id);
+            }
+        }
+
+        // A message that fails stays "missing", so it comes back in the next
+        // batch — without this the pass would retry it forever. Progress is
+        // measured, not assumed.
+        let progressed = match store.fts_counts() {
+            Ok((now, _)) => {
+                let moved = now > done;
+                done = now;
+                moved
+            }
+            Err(e) => {
+                tracing::warn!("text index: 无法确认进度: {e}");
+                false
+            }
+        };
+        if !progressed {
+            tracing::warn!("text index: 有 {} 封邮件无法索引，已跳过", batch.len());
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    tracing::info!("text index: 完成，{done}/{total}");
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers (outbound: what the assistant may borrow)
+// ---------------------------------------------------------------------------
+
+/// One server as the settings screen submits it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerInput {
+    /// Empty for a new server.
+    pub id: Option<String>,
+    pub name: String,
+    pub transport: McpTransport,
+    pub url: String,
+    pub auth: McpAuth,
+    /// Empty/None keeps the stored key, exactly as the AI settings do.
+    pub api_key: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub enabled: bool,
+}
+
+/// Refuse to send credentials over a cleartext link.
+///
+/// An authenticated `http://` endpoint hands the key to anyone on the path.
+/// Loopback is exempt because there is no path — a local bridge is the normal
+/// way to run one of these, and there is nothing to intercept.
+fn insecure_endpoint(input: &McpServerInput) -> Option<String> {
+    if input.transport != McpTransport::Http || input.auth == McpAuth::None {
+        return None;
+    }
+    let url = input.url.trim().to_ascii_lowercase();
+    let rest = url.strip_prefix("http://")?;
+    // The authority ends at the first '/', '?' or '#'.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // `http://localhost:80@evil.example/` is a request to evil.example — the
+    // part that looks like loopback is userinfo, not the destination. Rather
+    // than try to read past it, refuse: nothing here needs to send credentials
+    // in the URL, and a URL that does is either a mistake or an attempt.
+    if authority.contains('@') {
+        return Some(format!(
+            "「{}」的地址里带了 @，无法确定真正的目标主机。请去掉地址中的用户名部分。",
+            input.name.trim()
+        ));
+    }
+    // A bracketed IPv6 literal carries its own colons, so the port separator
+    // cannot simply be the first one.
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().map(|h| format!("[{h}]")).unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or("").to_string(),
+    };
+    let host = host.as_str();
+    let local = host == "localhost"
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host.ends_with(".localhost");
+    if local {
+        return None;
+    }
+    Some(format!(
+        "「{}」用 http:// 连接并且带了密钥，密钥会以明文经过网络。请改用 https://（本机地址除外）。",
+        input.name.trim()
+    ))
+}
+
+fn merge_mcp(old: Option<&McpServerConfig>, input: McpServerInput) -> McpServerConfig {
+    McpServerConfig {
+        id: input.id.filter(|id| !id.is_empty()).unwrap_or_else(new_id),
+        name: input.name.trim().to_string(),
+        transport: input.transport,
+        url: input.url.trim().to_string(),
+        auth: input.auth,
+        api_key: keep_secret(
+            input.api_key,
+            old.map(|o| o.api_key.clone()).unwrap_or_default(),
+        ),
+        command: input.command.trim().to_string(),
+        args: input.args.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect(),
+        // Same rule as `api_key`: a blank value means "keep what is stored",
+        // because that is all the form was ever shown. A name the user removed
+        // is still removed — only values present-but-empty are restored.
+        env: {
+            let stored = old.map(|o| o.env.clone()).unwrap_or_default();
+            input
+                .env
+                .into_iter()
+                .map(|(k, v)| {
+                    if v.is_empty() {
+                        let kept = stored.get(&k).cloned().unwrap_or_default();
+                        (k, kept)
+                    } else {
+                        (k, v)
+                    }
+                })
+                .collect()
+        },
+        enabled: input.enabled,
+    }
+}
+
+#[tauri::command]
+pub fn get_mcp_servers(state: State<'_, AppState>) -> CmdResult<Vec<McpServerPublic>> {
+    let servers = state.engine.store().mcp_servers().map_err(err_str)?;
+    Ok(servers.iter().map(McpServerPublic::from).collect())
+}
+
+/// Add or update one server, then forget its session so the next question
+/// connects with what was just saved.
+#[tauri::command]
+pub async fn save_mcp_server(
+    state: State<'_, AppState>,
+    input: McpServerInput,
+) -> CmdResult<Vec<McpServerPublic>> {
+    if input.name.trim().is_empty() {
+        return Err("请给这个服务器起一个名字".into());
+    }
+    if let Some(why) = insecure_endpoint(&input) {
+        return Err(why);
+    }
+    let store = state.engine.store();
+    let mut servers = store.mcp_servers().map_err(err_str)?;
+    let existing = input
+        .id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| servers.iter().position(|s| s.id == id));
+    let merged = merge_mcp(existing.map(|i| &servers[i]), input);
+
+    let id = merged.id.clone();
+    match existing {
+        Some(i) => servers[i] = merged,
+        None => servers.push(merged),
+    }
+    store.set_mcp_servers(&servers).map_err(err_str)?;
+    // The old session still speaks to the old URL with the old key.
+    mcp::hub().forget(&id).await;
+    Ok(servers.iter().map(McpServerPublic::from).collect())
+}
+
+#[tauri::command]
+pub async fn delete_mcp_server(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<McpServerPublic>> {
+    let store = state.engine.store();
+    let mut servers = store.mcp_servers().map_err(err_str)?;
+    servers.retain(|s| s.id != id);
+    store.set_mcp_servers(&servers).map_err(err_str)?;
+    mcp::hub().forget(&id).await;
+    Ok(servers.iter().map(McpServerPublic::from).collect())
+}
+
+/// Connect to every enabled server and report what each one offers.
+///
+/// This is the settings screen's "test" button and its status list at once:
+/// there is nothing to test about an MCP server except whether it connects and
+/// what tools it has.
+#[tauri::command]
+pub async fn mcp_status(state: State<'_, AppState>) -> CmdResult<Vec<McpServerStatus>> {
+    let engine = state.engine.clone();
+    Ok(mcp::hub().status(engine.store(), engine.http()).await)
+}
+
+/// Drop every cached session, so the next call reconnects from scratch.
+#[tauri::command]
+pub async fn reconnect_mcp(state: State<'_, AppState>) -> CmdResult<Vec<McpServerStatus>> {
+    let engine = state.engine.clone();
+    mcp::hub().forget_all().await;
+    Ok(mcp::hub().status(engine.store(), engine.http()).await)
+}
+
+// ---------------------------------------------------------------------------
 // Embedding index
 // ---------------------------------------------------------------------------
 
@@ -653,6 +1252,28 @@ pub fn index_pending(app: AppHandle, state: State<'_, AppState>) -> CmdResult<In
                 }
             }
         }
+
+        // Then the deep pass over starred mail. It runs second because the
+        // whole-message index is what makes search work at all; chunking the
+        // starred few only makes it sharper.
+        loop {
+            match rag::index_starred_pending(engine.store(), engine.http(), &settings, DEEP_BATCH)
+                .await
+            {
+                Ok(0) => break,
+                Ok(n) => {
+                    tracing::debug!("index: deep-indexed {n} starred message(s)");
+                    emit_index_status(&app, &engine, &index);
+                }
+                Err(e) => {
+                    let message = e.to_string();
+                    tracing::warn!("index: deep pass stopped: {message}");
+                    index.set_last_error(Some(message));
+                    break;
+                }
+            }
+        }
+
         index.building.store(false, Ordering::SeqCst);
         emit_index_status(&app, &engine, &index);
     });
@@ -731,27 +1352,22 @@ pub struct MemoryInput {
     pub source: Option<String>,
 }
 
-fn memory_from(
-    input: MemoryInput,
-    existing: Option<&MemoryEntry>,
-    now: i64,
-) -> CmdResult<MemoryEntry> {
-    let text = input.text.trim().to_string();
-    if text.is_empty() {
-        return Err("记忆内容不能为空".to_string());
-    }
-    Ok(MemoryEntry {
-        id: input
-            .id
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(new_id),
+/// History rows shown on the knowledge screen.
+const MEMORY_HISTORY: u32 = 50;
+/// Audit-trail rows shown for one memory.
+const MEMORY_EVENTS: u32 = 20;
+
+fn memory_from(input: MemoryInput, existing: Option<&MemoryEntry>, now: i64) -> MemoryEntry {
+    MemoryEntry {
+        id: input.id.filter(|id| !id.is_empty()).unwrap_or_else(new_id),
         kind: input.kind,
-        text,
+        text: input.text,
         source: input.source.filter(|s| !s.trim().is_empty()),
         // Editing a memory does not make it new; only `updated_at` moves.
         created_at: existing.map(|m| m.created_at).unwrap_or(now),
         updated_at: now,
-    })
+        ..Default::default()
+    }
 }
 
 #[tauri::command]
@@ -759,18 +1375,52 @@ pub fn list_memories(state: State<'_, AppState>) -> CmdResult<Vec<MemoryEntry>> 
     state.engine.store().list_memories().map_err(err_str)
 }
 
+/// Memories that stopped being true, newest first. Nothing here reaches a
+/// prompt; it is the record of what the assistant used to believe.
 #[tauri::command]
-pub fn save_memory(state: State<'_, AppState>, input: MemoryInput) -> CmdResult<MemoryEntry> {
-    let store = state.engine.store();
+pub fn list_memory_history(state: State<'_, AppState>) -> CmdResult<Vec<MemoryEntry>> {
+    state.engine.store().superseded_memories(MEMORY_HISTORY).map_err(err_str)
+}
+
+/// What happened to one memory, or to the memory as a whole when `id` is absent.
+#[tauri::command]
+pub fn memory_events(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> CmdResult<Vec<MemoryEvent>> {
+    state
+        .engine
+        .store()
+        .memory_events(id.as_deref(), MEMORY_EVENTS)
+        .map_err(err_str)
+}
+
+/// Add or edit a memory by hand.
+///
+/// Goes through `memory::write_by_hand`, which marks it as the user's own and
+/// therefore off-limits to the reconciler: a model rewriting a line a person
+/// typed would be the worst behaviour this feature could have.
+#[tauri::command]
+pub async fn save_memory(
+    state: State<'_, AppState>,
+    input: MemoryInput,
+) -> CmdResult<MemoryEntry> {
+    if input.text.trim().is_empty() {
+        return Err("记忆内容不能为空".to_string());
+    }
+    let engine = state.engine.clone();
+    let store = engine.store();
     // One indexed lookup: reading the whole table to find a single row got
     // slower with every memory the assistant ever stored.
     let existing = match input.id.as_deref().filter(|id| !id.is_empty()) {
         Some(id) => store.get_memory(id).map_err(err_str)?,
         None => None,
     };
-    let entry = memory_from(input, existing.as_ref(), now_ms())?;
-    store.upsert_memory(&entry).map_err(err_str)?;
-    Ok(entry)
+    let entry = memory_from(input, existing.as_ref(), now_ms());
+    let embedding = store.embedding_settings().map_err(err_str)?;
+    memory::write_by_hand(store, engine.http(), &embedding, &entry)
+        .await
+        .map_err(err_str)
 }
 
 #[tauri::command]
@@ -824,12 +1474,21 @@ impl PendingActions {
     }
 }
 
+/// One fragment of an answer being written.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantDelta {
+    pub conversation_id: String,
+    pub text: String,
+}
+
 /// Ask the assistant one question.
 ///
 /// `conversation_id` of `None` starts a new conversation; the id it was given is
 /// on the returned turn, so the caller can keep asking into the same thread.
 #[tauri::command]
 pub async fn assistant_ask(
+    app: AppHandle,
     state: State<'_, AppState>,
     conversation_id: Option<String>,
     text: String,
@@ -841,9 +1500,23 @@ pub async fn assistant_ask(
         .filter(|id| !id.is_empty())
         .unwrap_or_else(new_id);
 
-    let reply = assistant::ask(engine.store(), engine.http(), &conversation_id, &text)
-        .await
-        .map_err(err_str)?;
+    // Each fragment of prose, as the model writes it. Tagged with the
+    // conversation so a panel that has moved on ignores what it did not ask for.
+    let sink = {
+        let app = app.clone();
+        let id = conversation_id.clone();
+        move |chunk: &str| {
+            let _ = app.emit(
+                ASSISTANT_DELTA_EVENT,
+                AssistantDelta { conversation_id: id.clone(), text: chunk.to_string() },
+            );
+        }
+    };
+
+    let reply =
+        assistant::ask_streaming(engine.store(), engine.http(), &conversation_id, &text, &sink)
+            .await
+            .map_err(err_str)?;
     // The action is only ever executed from here, against this snapshot — the
     // model cannot hand `confirm_pending_action` an id it made up later.
     if let Some(action) = &reply.pending_confirmation {
@@ -951,6 +1624,132 @@ fn new_id() -> String {
 mod tests {
     use super::*;
 
+    fn mcp_input(url: &str, auth: McpAuth, transport: McpTransport) -> McpServerInput {
+        McpServerInput {
+            id: None,
+            name: "exa".into(),
+            transport,
+            url: url.into(),
+            auth,
+            api_key: Some("secret".into()),
+            command: String::new(),
+            args: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+        }
+    }
+
+    /// A key sent over cleartext is a key handed to whoever is on the path.
+    #[test]
+    fn an_authenticated_http_endpoint_is_refused() {
+        let bad = mcp_input("http://mcp.example.com/v1", McpAuth::Bearer, McpTransport::Http);
+        assert!(insecure_endpoint(&bad).is_some());
+    }
+
+    /// Loopback has no path to intercept, and a local bridge is the normal way
+    /// to run one of these.
+    #[test]
+    fn loopback_is_allowed_to_stay_plain() {
+        for url in [
+            "http://localhost:8080/mcp",
+            "http://127.0.0.1:3000",
+            "http://[::1]:9000/mcp",
+        ] {
+            let input = mcp_input(url, McpAuth::Bearer, McpTransport::Http);
+            assert!(insecure_endpoint(&input).is_none(), "{url}");
+        }
+    }
+
+    /// The loopback exemption must not be reachable through userinfo: the part
+    /// before an `@` is a username, not the host the key would go to.
+    #[test]
+    fn a_loopback_lookalike_in_userinfo_does_not_earn_the_exemption() {
+        for url in [
+            "http://localhost:80@evil.example/mcp",
+            "http://127.0.0.1@evil.example/",
+            "http://user:pass@evil.example/mcp",
+        ] {
+            let input = mcp_input(url, McpAuth::Bearer, McpTransport::Http);
+            assert!(insecure_endpoint(&input).is_some(), "{url}");
+        }
+    }
+
+    #[test]
+    fn https_and_unauthenticated_and_stdio_are_all_fine() {
+        assert!(insecure_endpoint(&mcp_input(
+            "https://mcp.example.com",
+            McpAuth::Bearer,
+            McpTransport::Http
+        ))
+        .is_none());
+        // Nothing secret to leak.
+        assert!(insecure_endpoint(&mcp_input(
+            "http://mcp.example.com",
+            McpAuth::None,
+            McpTransport::Http
+        ))
+        .is_none());
+        // stdio never touches the network.
+        assert!(insecure_endpoint(&mcp_input("", McpAuth::Bearer, McpTransport::Stdio)).is_none());
+    }
+
+    /// `env` on a stdio server is where tokens live, so the public DTO must
+    /// not carry the values — only which names are set.
+    #[test]
+    fn stdio_env_values_never_reach_the_frontend() {
+        let cfg = McpServerConfig {
+            id: "s1".into(),
+            name: "github".into(),
+            transport: McpTransport::Stdio,
+            url: String::new(),
+            auth: McpAuth::None,
+            api_key: String::new(),
+            command: "npx".into(),
+            args: vec!["-y".into()],
+            env: [("GITHUB_TOKEN".to_string(), "ghp_verysecret".to_string())]
+                .into_iter()
+                .collect(),
+            enabled: true,
+        };
+        let public = McpServerPublic::from(&cfg);
+        assert_eq!(public.env.get("GITHUB_TOKEN").map(String::as_str), Some(""));
+        assert!(!format!("{:?}", public).contains("verysecret"));
+    }
+
+    /// And a blank value coming back from that form keeps what was stored,
+    /// exactly as a blank api_key does — otherwise saving any other field
+    /// would wipe the token.
+    #[test]
+    fn a_blank_env_value_keeps_the_stored_secret() {
+        let old = McpServerConfig {
+            id: "s1".into(),
+            name: "github".into(),
+            transport: McpTransport::Stdio,
+            url: String::new(),
+            auth: McpAuth::None,
+            api_key: String::new(),
+            command: "npx".into(),
+            args: vec![],
+            env: [
+                ("GITHUB_TOKEN".to_string(), "ghp_verysecret".to_string()),
+                ("GONE".to_string(), "x".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            enabled: true,
+        };
+        let mut input = mcp_input("", McpAuth::None, McpTransport::Stdio);
+        input.name = "github".into();
+        // The form round-trips the blanked value, and drops "GONE" entirely.
+        input.env = [("GITHUB_TOKEN".to_string(), String::new())].into_iter().collect();
+
+        let merged = merge_mcp(Some(&old), input);
+        assert_eq!(merged.env.get("GITHUB_TOKEN").map(String::as_str), Some("ghp_verysecret"));
+        assert!(!merged.env.contains_key("GONE"), "a removed name stays removed");
+    }
+
+    use super::*;
+
     fn stored_ai() -> AiSettings {
         AiSettings {
             enabled: true,
@@ -1051,6 +1850,8 @@ mod tests {
         IndexStatus {
             indexed: 3,
             total: 10,
+            deep_indexed: 1,
+            deep_total: 2,
             model: "text-embedding-3-small".into(),
             building: false,
             error: Some("尚未配置嵌入接口地址".into()),
@@ -1127,9 +1928,8 @@ mod tests {
 
     #[test]
     fn a_new_memory_gets_an_id_and_both_timestamps() {
-        let entry = memory_from(memory_input(None, "  回信要简短  "), None, 1_700).unwrap();
+        let entry = memory_from(memory_input(None, "回信要简短"), None, 1_700);
         assert!(!entry.id.is_empty());
-        assert_eq!(entry.text, "回信要简短");
         // A whitespace-only source is no source at all.
         assert_eq!(entry.source, None);
         assert_eq!(entry.created_at, 1_700);
@@ -1142,21 +1942,15 @@ mod tests {
             id: "m1".into(),
             kind: MemoryKind::Fact,
             text: "旧内容".into(),
-            source: None,
             created_at: 1_000,
             updated_at: 1_000,
+            ..Default::default()
         };
-        let entry = memory_from(memory_input(Some("m1"), "新内容"), Some(&existing), 2_000).unwrap();
+        let entry = memory_from(memory_input(Some("m1"), "新内容"), Some(&existing), 2_000);
 
         assert_eq!(entry.id, "m1");
         assert_eq!(entry.created_at, 1_000);
         assert_eq!(entry.updated_at, 2_000);
         assert_eq!(entry.kind, MemoryKind::Preference);
-    }
-
-    #[test]
-    fn an_empty_memory_is_rejected() {
-        let err = memory_from(memory_input(None, "   \n "), None, 1).unwrap_err();
-        assert!(err.contains("不能为空"), "unexpected message: {err}");
     }
 }

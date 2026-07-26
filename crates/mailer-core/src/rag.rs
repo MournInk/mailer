@@ -61,6 +61,29 @@ const MAX_NEEDLES: usize = 24;
 /// pairs; this only stops a chatty model from narrating its reasoning.
 const RERANK_MAX_TOKENS: u32 = 800;
 
+// -- deep index over starred mail -------------------------------------------
+
+/// Characters per chunk of a starred message.
+///
+/// Small enough that a hit points at a passage rather than a page, large enough
+/// to keep a paragraph and its context together. Embedding models lose the plot
+/// well before their token limit; ~700 characters is comfortably inside where
+/// they stay coherent for both English and Chinese.
+const CHUNK_CHARS: usize = 700;
+/// Characters repeated from the end of the previous chunk, so a sentence split
+/// across a boundary is still findable from either side.
+const CHUNK_OVERLAP: usize = 120;
+/// Chunks per message. A 40-chunk message is a newsletter archive, not a letter,
+/// and embedding all of it would cost more than it could ever answer.
+const MAX_CHUNKS: usize = 40;
+/// Messages deep-indexed per [`index_starred_pending`] call.
+const MAX_DEEP_BATCH: u32 = 12;
+/// How much a passage from a starred message counts for against a whole-message
+/// hit. Starring is the user's own statement that the message matters, and the
+/// passage is a finer match than a summary vector, so it wins ties — but it does
+/// not get to outrank a genuinely better match elsewhere.
+const STARRED_BOOST: f32 = 0.06;
+
 // ---------------------------------------------------------------------------
 // Indexing
 // ---------------------------------------------------------------------------
@@ -110,6 +133,134 @@ pub async fn index_pending(
     Ok(stored)
 }
 
+/// Split a message body into overlapping chunks on sentence boundaries.
+///
+/// Pure, and the part worth testing: the cut must land on a character boundary
+/// (mail is routinely Chinese), must prefer to break where a reader would, and
+/// must always make progress so a pathological body cannot loop forever.
+pub fn chunk_body(text: &str, size: usize, overlap: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    // An overlap at or past the chunk size would never advance.
+    let overlap = overlap.min(size.saturating_sub(1));
+    let size = size.max(1);
+
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() && out.len() < MAX_CHUNKS {
+        let hard_end = (start + size).min(chars.len());
+        // Look for somewhere a reader would break, preferring the strongest
+        // boundary available in the back half of the window: a line break, then
+        // the end of a sentence, then the end of a clause. A window with none of
+        // them is cut at the size limit — better a blunt chunk than an unbounded
+        // one.
+        let end = if hard_end == chars.len() {
+            hard_end
+        } else {
+            let floor = start + size / 2;
+            let strength = |c: char| match c {
+                '\n' => 3,
+                '。' | '！' | '？' | '.' | '!' | '?' => 2,
+                '；' | ';' | '，' | ',' => 1,
+                _ => 0,
+            };
+            let mut cut = hard_end;
+            let mut best = 0;
+            for i in (floor..hard_end).rev() {
+                let s = strength(chars[i]);
+                if s > best {
+                    best = s;
+                    cut = i + 1;
+                    // A line break is as good as it gets; stop looking.
+                    if s == 3 {
+                        break;
+                    }
+                }
+            }
+            cut
+        };
+
+        let piece: String = chars[start..end].iter().collect();
+        let piece = piece.trim();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        if end >= chars.len() {
+            break;
+        }
+        // Always advance, whatever the overlap and wherever the cut landed.
+        start = (end.saturating_sub(overlap)).max(start + 1);
+    }
+    out
+}
+
+/// Embed the whole body of the next few starred messages that have no chunks.
+///
+/// Returns how many messages were indexed; `0` means the deep index is complete
+/// (or embeddings are off). Starred mail is the one thing the user has said
+/// matters, so it is the one thing indexed in full — see `message_chunks`.
+pub async fn index_starred_pending(
+    store: &Store,
+    http: &reqwest::Client,
+    settings: &EmbeddingSettings,
+    limit: u32,
+) -> Result<u32> {
+    if !settings.enabled {
+        return Ok(0);
+    }
+    validate_embedding(settings)?;
+    let model = settings.model.trim();
+
+    // Mail the user has since un-starred should stop being recalled first.
+    let pruned = store.prune_unstarred_chunks()?;
+    if pruned > 0 {
+        tracing::debug!("deep index: dropped {pruned} chunk(s) for un-starred mail");
+    }
+
+    let pending = store.starred_missing_chunks(model, limit.clamp(1, MAX_DEEP_BATCH))?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+
+    let now = crate::sync::now_ms();
+    let mut done = 0u32;
+    for msg in &pending {
+        let pieces = chunk_body(&deep_text(msg), CHUNK_CHARS, CHUNK_OVERLAP);
+        if pieces.is_empty() {
+            // Nothing to index, but it must not be picked up again every pass:
+            // one empty marker chunk claims the message.
+            store.put_chunks(&msg.id, model, &[], now)?;
+            continue;
+        }
+        let vectors = embed(http, settings, &pieces).await?;
+        if vectors.len() != pieces.len() {
+            return Err(Error::Ai(format!(
+                "嵌入接口返回 {} 条向量，期望 {} 条",
+                vectors.len(),
+                pieces.len()
+            )));
+        }
+        let stored: Vec<(String, Vec<f32>)> = pieces.into_iter().zip(vectors).collect();
+        store.put_chunks(&msg.id, model, &stored, now)?;
+        done += 1;
+    }
+    Ok(done)
+}
+
+/// What a starred message contributes to the deep index: the headers, then the
+/// whole body. Unlike [`embed_text`] nothing is truncated — that is the point.
+fn deep_text(msg: &EmailMessage) -> String {
+    let mut out = String::new();
+    out.push_str(&collapse_ws(&msg.subject));
+    out.push('\n');
+    out.push_str(&sender_line(msg));
+    out.push_str("\n\n");
+    out.push_str(&body_text(msg));
+    out
+}
+
 /// Index progress for the settings screen.
 ///
 /// `building` is left to the layer that owns the backfill task — from here a
@@ -117,6 +268,7 @@ pub async fn index_pending(
 pub fn status(store: &Store, settings: &EmbeddingSettings) -> Result<IndexStatus> {
     let model = settings.model.trim();
     let (indexed, total) = store.vector_counts(model)?;
+    let (deep_indexed, deep_total) = store.chunk_counts(model)?;
     // Surface an unusable configuration here, where the user is looking at it,
     // instead of leaving them with a counter stuck at zero.
     let error = if settings.enabled {
@@ -124,7 +276,15 @@ pub fn status(store: &Store, settings: &EmbeddingSettings) -> Result<IndexStatus
     } else {
         None
     };
-    Ok(IndexStatus { indexed, total, model: settings.model.clone(), building: false, error })
+    Ok(IndexStatus {
+        indexed,
+        total,
+        deep_indexed,
+        deep_total,
+        model: settings.model.clone(),
+        building: false,
+        error,
+    })
 }
 
 /// The text embedded for one message: subject, sender and a truncated body.
@@ -398,7 +558,8 @@ pub async fn search(
 
     let model = emb_settings.model.trim();
     let vectors = store.all_vectors(model)?;
-    if vectors.is_empty() {
+    let chunks = store.all_chunk_vectors(model)?;
+    if vectors.is_empty() && chunks.is_empty() {
         return keyword_search(store, query, want);
     }
 
@@ -415,6 +576,31 @@ pub async fn search(
         .into_iter()
         .filter_map(|(id, v)| cosine(&query_vec, &v).map(|s| (id, s)))
         .collect();
+
+    // The deep index over starred mail scores passages, not messages. Each
+    // message keeps its best passage: several paragraphs of one long mail must
+    // not crowd out every other message in the result set.
+    let mut best_chunk: std::collections::HashMap<String, (i64, f32)> =
+        std::collections::HashMap::new();
+    for (id, chunk, v) in chunks {
+        let Some(score) = cosine(&query_vec, &v) else { continue };
+        let score = score + STARRED_BOOST;
+        match best_chunk.get(&id) {
+            Some((_, prev)) if *prev >= score => {}
+            _ => {
+                best_chunk.insert(id, (chunk, score));
+            }
+        }
+    }
+    // A passage that beats the message's own summary vector replaces its score;
+    // the excerpt then quotes that passage rather than the top of the mail.
+    for (id, (_, score)) in &best_chunk {
+        match scored.iter_mut().find(|(mid, _)| mid == id) {
+            Some(entry) => entry.1 = entry.1.max(*score),
+            None => scored.push((id.clone(), *score)),
+        }
+    }
+
     if scored.is_empty() {
         // Every stored vector had a different width: the model kept its name
         // but changed its output size, so the whole index is stale. Substring
@@ -423,6 +609,17 @@ pub async fn search(
     }
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored.truncate(candidates);
+
+    // Hybrid: the keyword index gets a vote too.
+    //
+    // Embedding search is bad at exactly what mail is full of — an order number,
+    // a verification code, a product name, an address — and the published
+    // comparisons keep finding BM25 competitive with or better than dense
+    // retrieval on that kind of lookup. Neither is reliably better, so both
+    // rankings are fused rather than one being chosen.
+    if let Some(keyword_ids) = store.fts_search(query, candidates as u32)? {
+        scored = fuse(scored, &keyword_ids, candidates);
+    }
 
     // One batch rather than a query per candidate: `candidates` runs to 200.
     // A message deleted between the vector scan and here is simply absent, so
@@ -436,7 +633,12 @@ pub async fn search(
         .into_iter()
         .map(|msg| {
             let similarity = similarity.get(msg.id.as_str()).copied().unwrap_or(0.0);
-            let text = truncate_chars(&body_text(&msg), DOC_CHARS);
+            // For a starred message, the text the reranker and the excerpt work
+            // from is the passage that matched, not the opening of the mail.
+            let text = best_chunk
+                .get(&msg.id)
+                .and_then(|(chunk, _)| store.chunk_text(&msg.id, model, *chunk).ok().flatten())
+                .unwrap_or_else(|| truncate_chars(&body_text(&msg), DOC_CHARS));
             Candidate { msg, text, similarity }
         })
         .collect();
@@ -467,9 +669,80 @@ pub async fn search(
         .collect())
 }
 
-/// Substring search over subject / sender / snippet — the answer whenever the
-/// vector index cannot give one.
+/// Merge two rankings by reciprocal rank fusion.
+///
+/// RRF scores a document by `Σ 1/(k + rank)` across the rankings it appears in,
+/// which needs no calibration between them — and a cosine similarity and a BM25
+/// score have no common scale to calibrate. `k` damps the top of each list so one
+/// ranking cannot win on its first result alone; 60 is the value the original
+/// paper used and everything since has copied.
+///
+/// The result is still (id, score) sorted best-first, because that is what the
+/// caller does with it; the scores are no longer similarities and nothing
+/// downstream treats them as one.
+fn fuse(vector: Vec<(String, f32)>, keyword: &[String], keep: usize) -> Vec<(String, f32)> {
+    const K: f32 = 60.0;
+    let mut fused: Vec<(String, f32)> = Vec::with_capacity(vector.len() + keyword.len());
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    let mut add = |id: &str, rank: usize, fused: &mut Vec<(String, f32)>| {
+        let score = 1.0 / (K + rank as f32);
+        match index.get(id) {
+            Some(&i) => fused[i].1 += score,
+            None => {
+                index.insert(id.to_string(), fused.len());
+                fused.push((id.to_string(), score));
+            }
+        }
+    };
+
+    for (rank, (id, _)) in vector.iter().enumerate() {
+        add(id, rank, &mut fused);
+    }
+    for (rank, id) in keyword.iter().enumerate() {
+        add(id, rank, &mut fused);
+    }
+
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1));
+    fused.truncate(keep);
+    fused
+}
+
+/// Keyword search — the answer whenever the vector index cannot give one, and
+/// half of the answer when it can.
+///
+/// BM25 over the full-text index first, which reaches the whole body and ranks
+/// by relevance; `query_messages` after it, for the queries the index cannot
+/// answer. The old version searched subject, sender and a 140-character snippet
+/// and nothing else, so with embeddings switched off the assistant could not find
+/// a word in the third paragraph of a mail it had in front of it.
 fn keyword_search(store: &Store, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
+    if let Some(ids) = store.fts_search(query, limit)? {
+        if !ids.is_empty() {
+            let total = ids.len() as f32;
+            return Ok(store
+                .get_messages(&ids)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, msg)| {
+                    let text = truncate_chars(&body_text(&msg), DOC_CHARS);
+                    SearchHit {
+                        excerpt: excerpt_for(&text, query),
+                        // Best-first from BM25, mapped onto the same descending
+                        // scale the substring path reports.
+                        score: 1.0 - i as f32 / total,
+                        message_id: msg.id,
+                        account_id: msg.account_id,
+                        subject: msg.subject,
+                        from_name: msg.from_name,
+                        from_addr: msg.from_addr,
+                        date: msg.date,
+                    }
+                })
+                .collect());
+        }
+    }
+
     let page = store.query_messages(&MessageQuery {
         search: Some(query.to_string()),
         limit,
@@ -499,7 +772,7 @@ fn keyword_search(store: &Store, query: &str, limit: u32) -> Result<Vec<SearchHi
 /// Cosine similarity, or `None` when the two vectors must not be compared:
 /// mismatched widths (a leftover from another embedding model) or a zero /
 /// non-finite vector, which has no direction to compare against.
-fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.is_empty() || a.len() != b.len() {
         return None;
     }
@@ -1047,6 +1320,9 @@ mod tests {
 
     fn msg(id: &str, subject: &str, body: Option<&str>, html: Option<&str>) -> EmailMessage {
         EmailMessage {
+            cc_addrs: Vec::new(),
+            references: Vec::new(),
+            thread_id: String::new(),
             id: id.into(),
             account_id: "acc1".into(),
             folder: "INBOX".into(),
@@ -1131,6 +1407,168 @@ mod tests {
         let body = "账".repeat(EMBED_BODY_CHARS + 500);
         let t = embed_text(&msg("m1", "长邮件", Some(&body), None));
         assert_eq!(t.chars().filter(|c| *c == '账').count(), EMBED_BODY_CHARS);
+    }
+
+    // -- deep index over starred mail --------------------------------------
+
+    /// The cut lands where a reader would break, never mid-character, and the
+    /// walk always advances.
+    #[test]
+    fn chunk_body_breaks_on_sentences_and_overlaps() {
+        let text = "第一句话到这里。第二句话稍微长一点，也到这里。第三句是最后一句。";
+        let chunks = chunk_body(text, 20, 5);
+        assert!(chunks.len() >= 2, "{chunks:?}");
+        // Every chunk but the last ends on a boundary a reader would recognise.
+        for c in &chunks[..chunks.len() - 1] {
+            let last = c.chars().last().unwrap();
+            assert!(
+                matches!(last, '。' | '，' | '；' | '！' | '？'),
+                "chunk does not end where a reader would: {c:?}"
+            );
+        }
+        // No chunk exceeds the window.
+        for c in &chunks {
+            assert!(c.chars().count() <= 20, "oversize chunk: {c:?}");
+        }
+        // Nothing is lost: every character of the source appears somewhere.
+        let joined: String = chunks.concat();
+        for ch in text.chars().filter(|c| !c.is_whitespace()) {
+            assert!(joined.contains(ch), "lost {ch:?}");
+        }
+    }
+
+    #[test]
+    fn chunk_body_prefers_a_blank_line() {
+        let text = format!("{}\n\n{}", "甲".repeat(40), "乙".repeat(40));
+        let chunks = chunk_body(&text, 50, 6);
+        assert!(chunks[0].starts_with('甲'), "{:?}", chunks[0]);
+        assert!(!chunks[0].contains('乙'), "broke past the blank line: {:?}", chunks[0]);
+    }
+
+    /// An overlap at or beyond the window size would step backwards forever.
+    #[test]
+    fn chunk_body_always_advances() {
+        let text = "文".repeat(500);
+        for (size, overlap) in [(10, 10), (10, 99), (1, 0), (1, 5)] {
+            let chunks = chunk_body(&text, size, overlap);
+            assert!(!chunks.is_empty(), "size={size} overlap={overlap}");
+            assert!(chunks.len() <= MAX_CHUNKS, "unbounded: {}", chunks.len());
+        }
+        assert!(chunk_body("", 100, 10).is_empty());
+        assert!(chunk_body("   \n  ", 100, 10).is_empty());
+    }
+
+    #[test]
+    fn chunk_body_is_bounded() {
+        let chunks = chunk_body(&"段".repeat(CHUNK_CHARS * 100), CHUNK_CHARS, CHUNK_OVERLAP);
+        assert_eq!(chunks.len(), MAX_CHUNKS);
+    }
+
+    /// The deep index carries the whole body, which is the entire difference from
+    /// the per-message vector.
+    #[test]
+    fn deep_text_is_not_truncated() {
+        // A subject with no 账 in it, so the count below measures only the body.
+        let body = "账".repeat(EMBED_BODY_CHARS * 2);
+        let m = msg("m1", "很长的邮件", Some(&body), None);
+        let shallow = embed_text(&m).chars().filter(|c| *c == '账').count();
+        let deep = deep_text(&m).chars().filter(|c| *c == '账').count();
+        assert_eq!(shallow, EMBED_BODY_CHARS, "the shallow index still truncates");
+        assert_eq!(deep, EMBED_BODY_CHARS * 2, "the deep index must keep everything");
+        // The headers ride along with the body, so a passage hit still knows
+        // which message and sender it came from.
+        assert!(deep_text(&m).contains("很长的邮件"));
+        assert!(deep_text(&m).contains("billing@stripe.com"));
+    }
+
+    /// Only starred mail is deep-indexed, and un-starring retires the passages
+    /// so the retriever stops favouring what the user has dismissed.
+    #[test]
+    fn only_starred_mail_is_deep_indexed() {
+        let store = store_with_mail();
+        let model = "test-embed";
+        assert_eq!(store.starred_missing_chunks(model, 10).unwrap().len(), 0);
+
+        store.set_starred("m1", true).unwrap();
+        let pending = store.starred_missing_chunks(model, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "m1");
+
+        store
+            .put_chunks(
+                "m1",
+                model,
+                &[("第一段".into(), vec![1.0, 0.0]), ("第二段".into(), vec![0.0, 1.0])],
+                1,
+            )
+            .unwrap();
+        assert!(store.starred_missing_chunks(model, 10).unwrap().is_empty());
+        assert_eq!(store.chunk_counts(model).unwrap(), (1, 1));
+        assert_eq!(store.all_chunk_vectors(model).unwrap().len(), 2);
+        assert_eq!(store.chunk_text("m1", model, 1).unwrap().unwrap(), "第二段");
+
+        // Un-starred: the passages go.
+        store.set_starred("m1", false).unwrap();
+        assert_eq!(store.prune_unstarred_chunks().unwrap(), 2);
+        assert!(store.all_chunk_vectors(model).unwrap().is_empty());
+        assert_eq!(store.chunk_counts(model).unwrap(), (0, 0));
+    }
+
+    /// Re-indexing replaces the previous passages instead of stacking a second
+    /// set beside them.
+    #[test]
+    fn re_chunking_replaces_the_previous_pass() {
+        let store = store_with_mail();
+        store.set_starred("m1", true).unwrap();
+        let model = "test-embed";
+
+        store
+            .put_chunks("m1", model, &[("旧一".into(), vec![1.0]), ("旧二".into(), vec![1.0])], 1)
+            .unwrap();
+        store.put_chunks("m1", model, &[("新".into(), vec![1.0])], 2).unwrap();
+
+        let all = store.all_chunk_vectors(model).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(store.chunk_text("m1", model, 0).unwrap().unwrap(), "新");
+    }
+
+    #[tokio::test]
+    async fn deep_indexing_is_a_no_op_while_embeddings_are_off() {
+        let store = store_with_mail();
+        store.set_starred("m1", true).unwrap();
+        let http = reqwest::Client::new();
+        let settings = EmbeddingSettings::default();
+        assert_eq!(index_starred_pending(&store, &http, &settings, 5).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn status_reports_the_deep_index_separately() {
+        let store = store_with_mail();
+        let settings = EmbeddingSettings::default();
+        let idle = status(&store, &settings).unwrap();
+        assert_eq!((idle.deep_indexed, idle.deep_total), (0, 0));
+
+        store.set_starred("m1", true).unwrap();
+        let waiting = status(&store, &settings).unwrap();
+        assert_eq!((waiting.deep_indexed, waiting.deep_total), (0, 1), "one starred, none deep");
+
+        store.put_chunks("m1", &settings.model, &[("段".into(), vec![0.5])], 1).unwrap();
+        let done = status(&store, &settings).unwrap();
+        assert_eq!((done.deep_indexed, done.deep_total), (1, 1));
+    }
+
+    /// Clearing the index has to take the deep passages with it, or a re-index
+    /// under the same model would leave stale passages scoring against it.
+    #[test]
+    fn clearing_the_index_clears_the_deep_pass_too() {
+        let store = store_with_mail();
+        store.set_starred("m1", true).unwrap();
+        store.put_vector("m1", "m", &[0.1, 0.2], 1).unwrap();
+        store.put_chunks("m1", "m", &[("段".into(), vec![0.3])], 1).unwrap();
+
+        assert_eq!(store.clear_vectors("m").unwrap(), 2);
+        assert!(store.all_vectors("m").unwrap().is_empty());
+        assert!(store.all_chunk_vectors("m").unwrap().is_empty());
     }
 
     #[test]
@@ -1481,6 +1919,53 @@ mod tests {
         assert_eq!(hits[0].message_id, "m1");
         assert_eq!(hits[0].subject, "10 月账单");
         assert!(hits[0].score > 0.0);
+    }
+
+    /// With embeddings off, the keyword path is the whole answer — and it used to
+    /// see only the subject, the sender and a 140-character snippet. A number in
+    /// the middle of a long mail was unfindable by the assistant holding it.
+    #[test]
+    fn the_keyword_path_reaches_the_whole_body() {
+        let store = store_with_mail();
+        let mut long = msg("m3", "服务变更通知", None, None);
+        long.snippet = "尊敬的用户".into();
+        long.body_text = Some(format!(
+            "{}\n工单编号 TK-77321 已经关闭\n{}",
+            "客套话。".repeat(150),
+            "此致敬礼。".repeat(150)
+        ));
+        store.insert_message(&long).unwrap();
+
+        let hits = keyword_search(&store, "TK-77321", 5).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].message_id, "m3");
+        // And the excerpt quotes the part that matched, not the opening.
+        assert!(hits[0].excerpt.contains("TK-77321"), "{}", hits[0].excerpt);
+
+        let cn = keyword_search(&store, "工单编号", 5).unwrap();
+        assert_eq!(cn.len(), 1, "两个以上汉字要能命中正文: {cn:?}");
+    }
+
+    /// Neither ranking is reliably better, so both vote. Fusion has to keep what
+    /// both found at the top, and must not drop what only one of them found.
+    #[test]
+    fn fusion_prefers_what_both_rankings_found() {
+        let vector = vec![
+            ("only-vector".to_string(), 0.9),
+            ("both".to_string(), 0.5),
+        ];
+        let keyword = vec!["only-keyword".to_string(), "both".to_string()];
+
+        let fused = fuse(vector, &keyword, 10);
+        let order: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(order[0], "both", "agreement wins: {order:?}");
+        assert_eq!(order.len(), 3, "nothing is dropped: {order:?}");
+        assert!(order.contains(&"only-vector") && order.contains(&"only-keyword"));
+
+        // The cap is honoured, and a single ranking survives fusion unchanged.
+        assert_eq!(fuse(vec![("a".into(), 1.0)], &[], 10).len(), 1);
+        assert_eq!(fuse(vec![], &["a".to_string(), "b".to_string()], 1).len(), 1);
+        assert!(fuse(vec![], &[], 10).is_empty());
     }
 
     /// With embeddings switched off, `search` answers from the store alone —

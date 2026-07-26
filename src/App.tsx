@@ -33,9 +33,14 @@ export default function App() {
           <Sidebar />
           <MessageList />
           <MessageView />
-          <Assistant />
         </div>
       )}
+      {/* Docked over the layout rather than inside it: as a fourth column it
+          stole width from the reading pane until subjects wrapped one character
+          per line. It sits outside `view === "mail"` on purpose — a question
+          about your mail is worth asking from the settings screen too — but not
+          during onboarding, where there is no mail to ask about yet. */}
+      {accounts.length > 0 && <Assistant />}
       <AlertCenter />
       {compose && <Compose />}
       <CommandPalette />

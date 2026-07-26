@@ -19,9 +19,9 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  /* the 38px title bar supplies the air above; only the gap down to the first
-     tab needs to be generous */
-  padding: 9px 8px 14px;
+  /* the title bar above supplies the air; only the gap down to the first tab
+     needs to be generous */
+  padding: 2px 8px 14px;
   border-right: 1px solid var(--line);
   /* the sidebar's warm halo, same geometry and strength */
   background:
@@ -38,9 +38,11 @@
 .set-rail-head {
   padding: 4px 10px 0;
   margin-bottom: 8px;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.14em;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
   color: var(--ink-faint);
 }
 
@@ -120,12 +122,21 @@
 }
 
 .set-head {
+  flex-shrink: 0;
+  padding: 16px clamp(18px, 4vw, 40px) 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* Same measure as `.set-col`, so the title, the toolbar and the cards share a
+   left edge instead of the header hugging the pane and the body floating in the
+   middle of it. */
+.set-head-inner {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  flex-shrink: 0;
-  padding: 14px 20px 15px;
-  border-bottom: 1px solid var(--line);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
 }
 
 .set-head-text {
@@ -159,12 +170,11 @@
   color: var(--ink);
 }
 
+/* Sizing and overflow belong to `OverlayScroll`. The top padding is the gap
+   between the header rule and the first card, and it has to be the same 18px the
+   cards use between themselves — at 0 the first card welds itself to the rule. */
 .set-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 20px 20px 34px;
+  padding: 18px clamp(18px, 4vw, 40px) 56px;
 }
 
 .set-col {
@@ -420,7 +430,7 @@
 
 .set-card-actions {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
   flex-shrink: 0;
 }
@@ -1010,6 +1020,344 @@
   line-height: 1.65;
 }
 
+/* -- user labels ----------------------------------------------------------- */
+
+.lb-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Wraps, because the delete confirmation drops in as a full-width row under it. */
+.lb-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.lb-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.lb-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.lb-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The definition, shown in full rather than truncated: it is the thing the user
+   is actually maintaining, and a clipped sentence cannot be checked. */
+.lb-instruction {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.lb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.lb-hues {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lb-hue {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: 0 0 0 1px var(--line);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.lb-hue:hover {
+  transform: scale(1.08);
+}
+
+.lb-hue.active {
+  border-color: var(--surface);
+  box-shadow: 0 0 0 2px var(--ink-2);
+}
+
+/* -- privacy --------------------------------------------------------------- */
+
+.pv-totals {
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+
+.pv-total {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pv-total-num {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.pv-total-label {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+/* Weeks read down, days across — the shape everybody already knows how to
+   read. Scrolls rather than shrinking: a cell below 9px stops being a cell. */
+.pv-heat {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.pv-heat-week {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pv-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+/* Five steps of one hue. The empty cell is a surface, not a colour, so a quiet
+   fortnight looks like nothing happened rather than like something did. */
+.pv-l0 {
+  background: var(--surface-2);
+}
+.pv-l1 {
+  background: color-mix(in oklab, var(--accent) 22%, var(--surface-2));
+}
+.pv-l2 {
+  background: color-mix(in oklab, var(--accent) 45%, var(--surface-2));
+}
+.pv-l3 {
+  background: color-mix(in oklab, var(--accent) 70%, var(--surface-2));
+}
+.pv-l4 {
+  background: var(--accent);
+}
+
+.pv-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.pv-legend-label {
+  margin: 0 2px;
+}
+
+.pv-legend-peak {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.pv-top {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pv-top-head {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.pv-top-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pv-top-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.pv-top-host {
+  flex: 1 1 40%;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The bar is the comparison; the number is the fact. Both, because a bar alone
+   cannot be read off and a number alone cannot be ranked at a glance. */
+.pv-top-bar {
+  flex: 1 1 30%;
+  min-width: 40px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.pv-top-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.pv-top-count {
+  flex-shrink: 0;
+  min-width: 3ch;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+/* -- external tools (MCP) -------------------------------------------------- */
+
+/* Presets in the empty state: two wide rows rather than a grid, because the
+   hint under each one is the part that decides which to pick. */
+.set-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 46ch;
+  margin-top: 14px;
+  text-align: left;
+}
+
+/* `text-align` on the wrapper is not enough: a button gets `center` from the UA
+   stylesheet rather than inheriting. */
+.set-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 14px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  cursor: pointer;
+  transition: border-color var(--fast), background var(--fast);
+}
+
+.set-preset:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.set-preset-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.set-preset-hint {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+/* Same shape as .set-muted-tag, opposite meaning: this server answered. */
+.set-ok-tag {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ok) 14%, transparent);
+  color: var(--ok);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.set-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.set-tools-head {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* One line per tool: the name in mono, the server's own description after it,
+   clipped. A borrowed catalogue can be forty tools long. */
+.set-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.set-tool-desc {
+  min-width: 0;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* -- about ----------------------------------------------------------------- */
 
 .set-about {
@@ -1349,6 +1697,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The deep pass over starred mail: same bar, quieter, so the two are read as
+   one progress story rather than two competing ones. */
+.kb-bar-fill.deep {
+  background: color-mix(in oklab, var(--accent) 55%, var(--surface-2));
+}
+
+.kb-deep-hint {
+  display: block;
+  margin-top: 2px;
+}
+
 .kb-index-error {
   display: flex;
   align-items: center;
@@ -1363,10 +1722,20 @@
   align-items: center;
 }
 
-.kb-mem-kind {
+/* Two classes deep on purpose. `.input, .select, .textarea { width: 100% }` in
+   base.css has the same specificity as a single class here, and base.css is
+   emitted *after* this file (main.tsx imports App — and therefore every
+   component stylesheet — before it imports the base sheet), so a bare
+   single-class rule here would lose and the kind picker would eat the whole row. */
+.kb-mem-add .select {
   width: auto;
   min-width: 96px;
   flex-shrink: 0;
+}
+
+.kb-mem-add .input {
+  flex: 1;
+  min-width: 0;
 }
 
 .kb-mem-list {
@@ -1395,4 +1764,82 @@
   font-size: var(--text-sm);
   color: var(--ink);
   overflow-wrap: anywhere;
+}
+
+/* Provenance under the sentence: who wrote it, since when, how often it has
+   mattered. Quiet, because the sentence is the thing being read. */
+.kb-mem-meta {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* A memory row grows a trail below it, so the row has to stop being one line. */
+.kb-mem:has(.kb-trail) {
+  flex-wrap: wrap;
+}
+
+.kb-trail {
+  flex-basis: 100%;
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.kb-trail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+
+.kb-trail-op {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.kb-trail-when,
+.kb-trail-empty {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--ink-3);
+}
+
+.kb-trail-text {
+  min-width: 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.kb-trail-before {
+  color: var(--ink-3);
+  margin-right: 6px;
+}
+
+.kb-trail-reason {
+  display: block;
+  color: var(--ink-3);
+}
+
+.kb-history {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.kb-mem-old {
+  width: 100%;
+  opacity: 0.75;
 }

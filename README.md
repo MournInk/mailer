@@ -14,6 +14,10 @@
   - `普通邮件` → 静默存档
   - `重要邮件`（账单 / 安全告警等）→ 系统弹窗提示 + 推送到所有已配置的通知渠道
 - **多信息源通知**：Telegram Bot、QQ 机器人（OneBot v11：go-cqhttp / NapCat / Lagrange）、Bark（iOS）、通用 Webhook；每个渠道可独立选择要推送的邮件类型
+- **外部工具（MCP 客户端）**：接入任意 MCP 服务器（远程 HTTP 或本地进程），助手就能在回答邮件问题时顺手查网页、查仓库；工具名带服务器前缀，回答里会说明信息来自外部
+- **会改主意的记忆**：助手记下的偏好与事实会先和已有内容对照，再决定是新增、补全，还是替换（旧的转入历史而不是删掉）；设置里能看到每条的来源、生效日期与变更记录，手动写的那几条模型不会改
+- **拦截追踪器**（默认开启）：邮件里的远程图片多数是知道你何时打开邮件的请求。到达时就会扫描出它们的来源与类型，阅读时列出拦截了哪些，设置里有近十周的热力图与"拦截最多的来源"
+- **实时收件**：IMAP 账户各自保持一条 IDLE 长连接，新邮件到达即同步，而不是等下一次轮询；不支持 IDLE 的服务器与 POP3 仍按间隔同步
 - **本地优先**：邮件与配置存于本地 SQLite；LLM API 只在你配置后才会被调用
 
 ## 技术栈
@@ -101,10 +105,29 @@ npm run tauri ios dev
 | Bark | 设备 Key（iOS 推送） |
 | Webhook | 任意 URL，POST JSON 载荷 |
 
+## 外部工具（MCP）配置
+
+设置 → 外部工具 → 添加服务器。两种连接方式：
+
+| 方式 | 填什么 | 例子 |
+| --- | --- | --- |
+| 远程 HTTP | MCP 的 Streamable HTTP 端点 + 鉴权方式 + 密钥 | Exa `https://mcp.exa.ai/mcp`（`x-api-key`）、GitHub `https://api.githubcopilot.com/mcp/`（`Bearer` + PAT） |
+| 本地进程 | 可执行命令 + 参数（每行一个）+ 环境变量 | `npx -y @modelcontextprotocol/server-filesystem /path/to/notes` |
+
+保存后点「连接」，会实际握手一次并列出该服务器提供的工具。要点：
+
+- 服务器的**名字就是命名空间**：叫 `exa` 时它的搜索工具在助手那边是 `mcp__exa__web_search_exa`，两个服务器有同名工具也不会混淆
+- 密钥只存在本地 SQLite，只会发给你填的那个地址
+- 某个服务器连不上不会影响回答，只是这一轮少了这些工具；错误原因显示在对应卡片上
+- 提示词明确要求模型只向外部发送必要的关键词或标识，不要把邮件正文、验证码、重置链接贴进去；外部返回的内容和邮件一样被当作数据而非指令
+
+反方向（把本机邮箱暴露给 Claude Desktop 等客户端）见 [`crates/mailer-mcp`](crates/mailer-mcp/README.md)。
+
 ## 目录结构
 
 ```
-crates/mailer-core/   # 纯 Rust 核心：协议、AI、通知、存储、同步编排（可独立测试）
+crates/mailer-core/   # 纯 Rust 核心：协议、AI、RAG、MCP 客户端、通知、存储、同步编排（可独立测试）
+crates/mailer-mcp/    # MCP 服务端：把本机邮箱暴露给外部 Agent
 src-tauri/            # Tauri 2 壳：窗口、系统通知、IPC 命令
 src/                  # React 前端：三栏邮件 UI + 设置
 ```

@@ -3,18 +3,21 @@
  * the right. The active tab lives in the store, so `openSettings("ai")` from
  * anywhere in the app lands directly on the right pane.
  *
- * Under 760px the rail folds into a top tab strip — the four labels are short
- * enough to share one row, so nothing ever scrolls sideways.
+ * Under 760px the rail folds into a top tab strip — the labels are short enough
+ * to share one row, so nothing ever scrolls sideways.
  */
 
 import { useEffect } from "react";
 import { useApp, type SettingsTab } from "../../lib/store";
 import { Icon } from "../Icon";
+import { OverlayScroll } from "../OverlayScroll";
 import { AboutTab } from "./AboutTab";
 import { AccountsTab } from "./AccountsTab";
 import { AiTab } from "./AiTab";
 import { KnowledgeTab } from "./KnowledgeTab";
 import { ChannelsTab } from "./ChannelsTab";
+import { ToolsTab } from "./ToolsTab";
+import { PrivacyTab } from "./PrivacyTab";
 import "./Settings.css";
 
 const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }> = [
@@ -35,6 +38,18 @@ const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }
     label: "知识库",
     icon: "archive",
     sub: "语义检索的向量与重排模型，以及助手的记忆",
+  },
+  {
+    key: "tools",
+    label: "外部工具",
+    icon: "plug",
+    sub: "接入 MCP 服务器，让助手能查邮件之外的东西",
+  },
+  {
+    key: "privacy",
+    label: "阅读与隐私",
+    icon: "shield",
+    sub: "会话视图，以及拦截邮件里的追踪器",
   },
   {
     key: "channels",
@@ -87,32 +102,39 @@ export function SettingsView() {
       </nav>
 
       <div className="set-main">
+        {/* The header shares the body's measure, so the page title, the toolbar
+            under it and the cards below all start on one left edge. Left-aligned
+            against a centred column, the two read as different pages. */}
         <header className="set-head">
-          <div className="set-head-text">
-            <h1 className="set-title">{active.label}</h1>
-            <p className="set-subtitle">{active.sub}</p>
+          <div className="set-head-inner">
+            <div className="set-head-text">
+              <h1 className="set-title">{active.label}</h1>
+              <p className="set-subtitle">{active.sub}</p>
+            </div>
+            <button
+              className="btn btn-ghost set-close"
+              onClick={closeSettings}
+              title="返回邮件（Esc）"
+              aria-label="关闭设置"
+            >
+              <Icon name="back" size={16} />
+              <span className="set-close-label">返回邮件</span>
+            </button>
           </div>
-          <button
-            className="btn btn-ghost set-close"
-            onClick={closeSettings}
-            title="返回邮件（Esc）"
-            aria-label="关闭设置"
-          >
-            <Icon name="back" size={16} />
-            <span className="set-close-label">返回邮件</span>
-          </button>
         </header>
 
-        <div className="set-scroll">
+        <OverlayScroll className="set-scroll">
           {/* keyed so switching tabs replays the fade instead of morphing */}
           <div className="set-col fade-up" key={settingsTab}>
             {settingsTab === "accounts" && <AccountsTab />}
             {settingsTab === "ai" && <AiTab />}
             {settingsTab === "knowledge" && <KnowledgeTab />}
+            {settingsTab === "tools" && <ToolsTab />}
+            {settingsTab === "privacy" && <PrivacyTab />}
             {settingsTab === "channels" && <ChannelsTab />}
             {settingsTab === "about" && <AboutTab />}
           </div>
-        </div>
+        </OverlayScroll>
       </div>
     </div>
   );

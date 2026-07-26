@@ -6,15 +6,24 @@
  *    (DOMPurify) before it can reach `dangerouslySetInnerHTML`, and remote
  *    images are parked in `data-src` until the user asks for them, because a
  *    remote image in mail is a read receipt for the sender.
- *  - Server-side deletion is irreversible, so the delete control defaults to a
- *    local-only delete and hides the server variant behind a confirmation.
+ *  - Deleting means deleting: one button, and the message goes from here and
+ *    from the server. The row disappears before the round trip finishes and
+ *    comes back if the server refused it, which is a truer safety net than a
+ *    confirmation dialog nobody reads.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import * as api from "../lib/api";
 import { formatFullDate, useApp } from "../lib/store";
-import { CATEGORY_LABEL, type AttachmentMeta, type EmailMessage } from "../lib/types";
+import {
+  CATEGORY_LABEL,
+  TRACKER_KIND_LABEL,
+  type AttachmentMeta,
+  type DraftKind,
+  type EmailMessage,
+  type TrackerHit,
+} from "../lib/types";
 import { Icon } from "./Icon";
 import "./MessageView.css";
 
@@ -111,6 +120,17 @@ function sanitizeBody(dirty: string, allowRemote: boolean): CleanBody {
   }
 }
 
+/**
+ * Requests that were actually tracking, as opposed to merely remote.
+ *
+ * A newsletter's forty product photos are forty blocked requests and zero
+ * trackers; one 1×1 gif from an ESP is one blocked request and one tracker. The
+ * headline number has to be the second kind or it means nothing.
+ */
+function trackerCount(hits: TrackerHit[]): number {
+  return hits.filter((h) => h.kind !== "remote").reduce((n, h) => n + h.count, 0);
+}
+
 /** Bytes → short human string (attachment rows are metadata, keep them terse). */
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -160,14 +180,43 @@ export function MessageView() {
 }
 
 function MessageDetail({ msg }: { msg: EmailMessage }) {
-  const { select, toggleStar, remove, openCompose, pushToast } = useApp();
+  const { select, toggleStar, remove, composeFrom, pushToast, blockTrackers } = useApp();
 
-  const [showImages, setShowImages] = useState(false);
+  // With blocking off, remote content loads with the message. The state is keyed
+  // on the setting so flipping the switch takes effect on the open mail rather
+  // than on the next one.
+  const [showImages, setShowImages] = useState(!blockTrackers);
+  useEffect(() => setShowImages(!blockTrackers), [blockTrackers, msg.id]);
   const [showRecipients, setShowRecipients] = useState(false);
   const [showReason, setShowReason] = useState(false);
+  const [showTrackers, setShowTrackers] = useState(false);
   const [reclassifying, setReclassifying] = useState(false);
 
+  // What this message wanted to load, scanned when it arrived. Read-only, and
+  // absent for text-only mail — a failure here costs the report, nothing else.
+  const [trackers, setTrackers] = useState<TrackerHit[]>([]);
+  useEffect(() => {
+    let live = true;
+    setTrackers([]);
+    setShowTrackers(false);
+    void api
+      .messageTrackers(msg.id)
+      .then((t) => {
+        if (live) setTrackers(t);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [msg.id]);
+
   const subject = msg.subject || "(无主题)";
+  // Whether reply-all would reach anyone the plain reply would not. Counting
+  // recipients is enough: a mail addressed only to this user has exactly one,
+  // and the backend drops the user's own addresses either way.
+  // Defensive on both lists: a payload missing one of them should cost the
+  // reply-all button, not the whole reading pane.
+  const othersOnThread = (msg.toAddrs?.length ?? 0) + (msg.ccAddrs?.length ?? 0) > 1;
   const analysis = msg.analysis;
   /** Monogram for the letterhead — same convention as the sidebar accounts. */
   const monogram = (msg.fromName || msg.fromAddr).trim().charAt(0) || "?";
@@ -178,14 +227,18 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
   );
 
   // -- actions ---------------------------------------------------------------
-  const reply = useCallback(() => {
-    openCompose({
-      accountId: msg.accountId,
-      to: msg.fromAddr,
-      subject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
-      inReplyTo: msg.id,
-    });
-  }, [openCompose, msg.accountId, msg.fromAddr, msg.id, subject]);
+  /**
+   * Open the composer for a reply, a reply-all or a forward.
+   *
+   * Delegated to the store so the keyboard shortcuts and these buttons go
+   * through one path. The recipient set is computed in Rust, not here: getting
+   * it wrong is silent — the mail sends, it looks right, and the people who
+   * were dropped simply never hear back. See `mailer_core::reply`.
+   */
+  const compose = useCallback(
+    (kind: DraftKind) => composeFrom(msg.id, kind),
+    [composeFrom, msg.id],
+  );
 
   const reclassify = useCallback(async () => {
     if (reclassifying) return;
@@ -244,11 +297,34 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
           <button
             className="btn btn-ghost btn-sm mv-act"
-            onClick={reply}
+            onClick={() => void compose("reply")}
             title="回复发件人"
           >
             <Icon name="reply" size={15} />
             <span className="mv-bar-text">回复</span>
+          </button>
+
+          {/* Only when there is somebody else to include. On a one-to-one mail
+              reply-all is the same mail, and a button that does what the one
+              beside it does is a button you have to think about. */}
+          {othersOnThread && (
+            <button
+              className="btn btn-ghost btn-sm mv-act"
+              onClick={() => void compose("reply_all")}
+              title="回复所有人"
+            >
+              <Icon name="reply-all" size={15} />
+              <span className="mv-bar-text">回复全部</span>
+            </button>
+          )}
+
+          <button
+            className="btn btn-ghost btn-sm mv-act"
+            onClick={() => void compose("forward")}
+            title="转发这封邮件"
+          >
+            <Icon name="forward" size={15} />
+            <span className="mv-bar-text">转发</span>
           </button>
 
           <button
@@ -267,7 +343,17 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
           <span className="mv-act-sep" aria-hidden="true" />
 
-          <DeleteControl onDelete={(onServer) => void remove([msg.id], onServer)} />
+          {/* One button, one meaning: the message is deleted, here and on the
+              server. It disappears at once and comes back if the server
+              refused — see `remove` in the store. */}
+          <button
+            className="btn btn-ghost btn-sm mv-act mv-del"
+            onClick={() => void remove([msg.id])}
+            title="删除邮件（同时从服务器删除）"
+          >
+            <Icon name="trash" size={15} />
+            <span className="mv-bar-text">删除</span>
+          </button>
         </div>
       </header>
 
@@ -317,6 +403,16 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
                   )}
                 </div>
               ))}
+
+            {/* Who else can see this. Shown because reply-all will write to
+                them, and a recipient list you cannot check is one you cannot
+                correct before sending. */}
+            {(msg.ccAddrs?.length ?? 0) > 0 && (
+              <p className="mv-to">
+                <span className="mv-to-label">抄送</span>
+                <span className="mv-addr">{msg.ccAddrs.join("、")}</span>
+              </p>
+            )}
           </header>
 
           {/* -- AI panel: the signature element of the app ------------------ */}
@@ -354,6 +450,19 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
               {analysis.summary && <p className="mv-summary">{analysis.summary}</p>}
 
+              {/* The user's own categories, if any applied. Under the summary
+                  because that is what they qualify — not the verdict above. */}
+              {analysis.labels.length > 0 && (
+                <div className="mv-labels">
+                  {analysis.labels.map((name) => (
+                    <span key={name} className="mv-label">
+                      <Icon name="tag" size={12} />
+                      {name}
+                    </span>
+                  ))}
+                </div>
+              )}
+
               <footer className="mv-ai-foot">
                 <span className="mv-conf">
                   置信度
@@ -379,26 +488,66 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
             </section>
           )}
 
-          {/* -- remote image gate ------------------------------------------- */}
+          {/* -- what this mail wanted to load -------------------------------
+              Under the AI panel, because it is the same kind of thing: something
+              the app worked out about this message that the message itself does
+              not say. The count comes from the sanitizer (what was actually
+              neutralised, live); the names come from the scan done when the mail
+              arrived, which knows which hosts and why. */}
           {body && body.blocked > 0 && !showImages && (
             <div className="card mv-imgbar">
-              <span className="mv-imgbar-chip" aria-hidden="true">
-                <Icon name="shield" size={16} />
-              </span>
-              <span className="mv-imgbar-text">
-                <span className="mv-imgbar-title">
-                  已阻止 {body.blocked} 处远程图片
+              <div className="mv-imgbar-row">
+                <span className="mv-imgbar-chip" aria-hidden="true">
+                  <Icon name="shield" size={16} />
                 </span>
-                <span className="mv-imgbar-hint">
-                  载入远程图片会让发件人知道你读过这封邮件。
+                <span className="mv-imgbar-text">
+                  <span className="mv-imgbar-title">
+                    {trackerCount(trackers) > 0
+                      ? `已拦截 ${trackerCount(trackers)} 个追踪器，共阻止 ${body.blocked} 处远程内容`
+                      : `已阻止 ${body.blocked} 处远程内容`}
+                  </span>
+                  <span className="mv-imgbar-hint">
+                    载入远程内容会让发件人知道你读过这封邮件，以及什么时候读的。
+                  </span>
                 </span>
-              </span>
-              <button
-                className="btn btn-sm mv-imgbar-btn"
-                onClick={() => setShowImages(true)}
-              >
-                显示图片
-              </button>
+                <button
+                  className="btn btn-sm mv-imgbar-btn"
+                  onClick={() => setShowImages(true)}
+                >
+                  显示图片
+                </button>
+              </div>
+
+              {trackers.length > 0 && (
+                <>
+                  <button
+                    className="mv-disclosure mv-track-toggle"
+                    onClick={() => setShowTrackers((v) => !v)}
+                    aria-expanded={showTrackers}
+                  >
+                    <Icon
+                      name={showTrackers ? "chevron-down" : "chevron-right"}
+                      size={13}
+                    />
+                    拦截了哪些
+                  </button>
+                  {showTrackers && (
+                    <ul className="mv-track-list">
+                      {trackers.map((t) => (
+                        <li key={`${t.host}-${t.kind}`} className="mv-track">
+                          <span className={`mv-track-tag mv-track-${t.kind}`}>
+                            {TRACKER_KIND_LABEL[t.kind]}
+                          </span>
+                          <span className="mv-track-host">{t.host}</span>
+                          {t.count > 1 && (
+                            <span className="mv-track-count">×{t.count}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
             </div>
           )}
 
@@ -414,6 +563,11 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
           ) : (
             <p className="mv-text mv-nobody">这封邮件没有正文内容。</p>
           )}
+
+          {/* -- the rest of the conversation ---------------------------------
+              After the body, not before it: the mail you clicked is what you
+              came to read, and the history is what you reach for afterwards. */}
+          <ThreadStrip msg={msg} />
 
           {/* -- attachments --------------------------------------------------- */}
           {msg.attachments.length > 0 && (
@@ -436,112 +590,98 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 }
 
 /**
- * Split delete control: the button itself does the safe thing (local only),
- * the caret opens the server variant, which asks once before it fires.
+ * The rest of the conversation, in the order it happened.
+ *
+ * The open message keeps the pane — its analysis, its tracker report, its
+ * attachments all belong to it. What the thread adds is context, so the other
+ * messages arrive collapsed: sender, date, and the first line, which is what
+ * you need to remember where you were. Expanding one reveals its body inline;
+ * opening it properly is one click further on.
+ *
+ * Remote content stays blocked in here regardless of the setting. An expanded
+ * summary is a glance, not a read, and quietly firing a tracking pixel for
+ * every mail in a long thread because the user unfolded one of them is not a
+ * trade this view gets to make on their behalf.
  */
-function DeleteControl({ onDelete }: { onDelete: (onServer: boolean) => void }) {
-  const [open, setOpen] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
+function ThreadStrip({ msg }: { msg: EmailMessage }) {
+  const { select } = useApp();
+  const [chain, setChain] = useState<EmailMessage[]>([]);
+  const [open, setOpen] = useState<string | null>(null);
 
-  // close on outside click / Escape
   useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
+    let live = true;
+    setChain([]);
+    setOpen(null);
+    if (!msg.threadId) return;
+    void api
+      .threadMessages(msg.threadId)
+      .then((c) => {
+        if (live) setChain(c);
+      })
+      .catch(() => {});
     return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
+      live = false;
     };
-  }, [open]);
+  }, [msg.threadId, msg.id]);
 
-  // every re-open starts from the non-destructive state
-  useEffect(() => {
-    if (!open) setConfirming(false);
-  }, [open]);
+  const others = chain.filter((m) => m.id !== msg.id);
+  if (others.length === 0) return null;
 
   return (
-    <div className="mv-del" ref={wrapRef}>
-      <button
-        className="btn btn-ghost btn-sm mv-act mv-del-main"
-        onClick={() => onDelete(false)}
-        title="仅从本地删除（服务器上的邮件保留）"
-      >
-        <Icon name="trash" size={15} />
-        <span className="mv-bar-text">删除</span>
-      </button>
-      <button
-        className="btn btn-ghost btn-sm mv-act mv-del-caret"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label="删除选项"
-        title="删除选项"
-      >
-        <Icon name="chevron-down" size={13} />
-      </button>
+    <section className="mv-thread" aria-label="这场对话的其他邮件">
+      <div className="mv-thread-head">
+        <Icon name="mail" size={14} />
+        <span className="mv-thread-title">这场对话共 {chain.length} 封</span>
+        <span className="mv-thread-hint">下面是其余 {others.length} 封，按时间排列</span>
+      </div>
 
-      {open && (
-        <div className="card mv-menu fade-up" role="menu">
-          {confirming ? (
-            <>
-              <p className="mv-menu-warn">
-                将同时删除服务器上的邮件，此操作无法撤销。
-              </p>
-              <div className="mv-menu-actions">
-                <button className="btn btn-sm" onClick={() => setConfirming(false)}>
-                  取消
-                </button>
-                <button
-                  className="btn btn-sm btn-danger"
-                  onClick={() => {
-                    setOpen(false);
-                    onDelete(true);
-                  }}
-                >
-                  确认删除
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
+      <ul className="mv-thread-list">
+        {others.map((m) => {
+          const expanded = open === m.id;
+          return (
+            <li key={m.id} className={`mv-thread-row${expanded ? " open" : ""}`}>
               <button
-                className="mv-menu-item"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false);
-                  onDelete(false);
-                }}
+                className="mv-thread-line"
+                onClick={() => setOpen(expanded ? null : m.id)}
+                aria-expanded={expanded}
               >
-                <Icon name="trash" size={15} />
-                <span className="mv-menu-text">
-                  <span className="mv-menu-title">仅本地</span>
-                  <span className="mv-menu-hint">默认 · 服务器上仍保留</span>
-                </span>
+                <Icon name={expanded ? "chevron-down" : "chevron-right"} size={13} />
+                <span className="mv-thread-from">{m.fromName || m.fromAddr}</span>
+                <span className="mv-thread-snippet">{m.snippet}</span>
+                <time className="mv-thread-date" dateTime={new Date(m.date).toISOString()}>
+                  {formatFullDate(m.date)}
+                </time>
               </button>
-              <button
-                className="mv-menu-item danger"
-                role="menuitem"
-                onClick={() => setConfirming(true)}
-              >
-                <Icon name="alert" size={15} />
-                <span className="mv-menu-text">
-                  <span className="mv-menu-title">同时删除服务器</span>
-                  <span className="mv-menu-hint">不可撤销</span>
-                </span>
-              </button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
+
+              {expanded && (
+                <div className="mv-thread-body">
+                  <ThreadBody msg={m} />
+                  <button className="btn btn-sm" onClick={() => void select(m.id)}>
+                    <Icon name="mail" size={14} />
+                    单独打开这封
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
+}
+
+/** One expanded message inside the strip. Remote content always blocked. */
+function ThreadBody({ msg }: { msg: EmailMessage }) {
+  const body = useMemo(
+    () => (msg.bodyHtml ? sanitizeBody(msg.bodyHtml, false) : null),
+    [msg.bodyHtml],
+  );
+  if (body) {
+    /* sanitizeBody() is the only path that produces this string */
+    return <div className="mv-html" dangerouslySetInnerHTML={{ __html: body.html }} />;
+  }
+  if (msg.bodyText) return <div className="mv-text">{msg.bodyText}</div>;
+  return <p className="mv-text mv-nobody">这封邮件没有正文内容。</p>;
 }
 
 /** Attachments are metadata only — there is no download command yet. */

@@ -38,6 +38,14 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
 
   const [accountId, setAccountId] = useState(initial.accountId);
   const [to, setTo] = useState(initial.to);
+  const [cc, setCc] = useState(initial.cc);
+  const [bcc, setBcc] = useState(initial.bcc);
+  // The copy fields stay folded away until there is something in them. Most
+  // mail has none, and two empty inputs above the subject is two more things
+  // to read past every time.
+  const [showCopies, setShowCopies] = useState(
+    () => initial.cc.trim() !== "" || initial.bcc.trim() !== "",
+  );
   const [subject, setSubject] = useState(initial.subject);
   const [body, setBody] = useState(initial.body);
   const [sending, setSending] = useState(false);
@@ -53,6 +61,18 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
   );
   const canSend = !!account?.hasSmtp;
   const isReply = initial.inReplyTo !== null;
+  // A forward carries a quoted original but starts its own conversation, so it
+  // has no parent. That is exactly what distinguishes it from a reply here.
+  const isForward = !isReply && initial.body.trim() !== "";
+  const manyRecipients = parseRecipients(initial.to).length + parseRecipients(initial.cc).length > 1;
+  const kindLabel = isForward ? "转发" : isReply ? (manyRecipients ? "回复全部" : "回复") : "写邮件";
+  const kindHint = isForward
+    ? "把这封邮件转给别人，原文已经附在下面"
+    : isReply
+      ? manyRecipients
+        ? "回复发件人以及这封邮件的其他收件人"
+        : "回复这封邮件的发件人"
+      : "从你的某个账户发出一封新邮件";
 
   // a reply already knows its recipient — start in the field the user needs
   useEffect(() => {
@@ -72,14 +92,20 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
     if (sending) return;
 
     const recipients = parseRecipients(to);
-    if (recipients.length === 0) {
+    const copies = parseRecipients(cc);
+    const blind = parseRecipients(bcc);
+    if (recipients.length === 0 && copies.length === 0 && blind.length === 0) {
       setError("请至少填写一位收件人。");
       toRef.current?.focus();
       return;
     }
-    const invalid = recipients.filter((addr) => !ADDRESS.test(addr));
+    // Every field is checked, not just To: an unsendable address on the Cc
+    // line fails the whole message at the relay, which is a worse place to
+    // find out about it than here.
+    const invalid = [...recipients, ...copies, ...blind].filter((a) => !ADDRESS.test(a));
     if (invalid.length > 0) {
       setError(`收件人地址格式有误：${invalid.join("、")}`);
+      if (!showCopies && (copies.length > 0 || blind.length > 0)) setShowCopies(true);
       toRef.current?.focus();
       return;
     }
@@ -99,6 +125,8 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
       await api.sendMail({
         accountId,
         to: recipients,
+        cc: copies,
+        bcc: blind,
         subject,
         body,
         inReplyTo: initial.inReplyTo,
@@ -146,16 +174,16 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
         className="card cp-modal fade-up"
         role="dialog"
         aria-modal="true"
-        aria-label={isReply ? "回复邮件" : "写邮件"}
+        aria-label={kindLabel}
       >
         <header className="cp-head">
           <span className="cp-mark" aria-hidden="true">
-            <Icon name={isReply ? "reply" : "edit"} size={16} />
+            <Icon name={isForward ? "forward" : isReply ? (manyRecipients ? "reply-all" : "reply") : "edit"} size={16} />
           </span>
           <span className="cp-headings">
-            <h2 className="cp-title">{isReply ? "回复" : "写邮件"}</h2>
+            <h2 className="cp-title">{kindLabel}</h2>
             <span className="cp-sub">
-              {isReply ? "回复这封邮件的发件人" : "从你的某个账户发出一封新邮件"}
+              {kindHint}
             </span>
           </span>
           <button
@@ -209,7 +237,48 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
               placeholder="name@example.com，多个地址用逗号或分号分隔"
               onChange={(e) => setTo(e.target.value)}
             />
+            {!showCopies && (
+              <button
+                type="button"
+                className="cp-copies-toggle"
+                onClick={() => setShowCopies(true)}
+              >
+                添加抄送 / 密送
+              </button>
+            )}
           </div>
+
+          {showCopies && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="cp-cc">
+                  抄送
+                </label>
+                <input
+                  id="cp-cc"
+                  className="input cp-mono"
+                  value={cc}
+                  disabled={sending}
+                  placeholder="所有收件人都会看到这些地址"
+                  onChange={(e) => setCc(e.target.value)}
+                />
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="cp-bcc">
+                  密送
+                </label>
+                <input
+                  id="cp-bcc"
+                  className="input cp-mono"
+                  value={bcc}
+                  disabled={sending}
+                  placeholder="收到副本，但其他人看不到这些地址"
+                  onChange={(e) => setBcc(e.target.value)}
+                />
+              </div>
+            </>
+          )}
 
           <div className="field">
             <label className="field-label" htmlFor="cp-subject">

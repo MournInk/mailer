@@ -1,0 +1,63 @@
+/* The floating scrollbar. See OverlayScroll.tsx for why it is not native. */
+
+.ovs {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
+.ovs-view {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* No native bar, and — the point of the exercise — no reserved gutter. */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.ovs-view::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.ovs-thumb {
+  position: absolute;
+  right: 3px;
+  width: 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--ink) 26%, transparent);
+  opacity: 0;
+  /* Painted over the content, so it must not swallow clicks meant for a row
+     until it is actually visible. */
+  pointer-events: none;
+  transition: opacity var(--dur-base) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+/* Visible while the pointer is in the area or the content is moving. */
+.ovs-active .ovs-thumb {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ovs-thumb:hover {
+  background: color-mix(in srgb, var(--ink) 42%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ovs-thumb {
+    transition: none;
+  }
+}
+
+/* A coarse pointer never hovers, and the platform already fades its own bar in
+   during a flick, so ours only shows while the content is moving. */
+@media (pointer: coarse) {
+  .ovs-thumb {
+    width: 4px;
+    right: 2px;
+  }
+}

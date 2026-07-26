@@ -28,8 +28,16 @@ struct TauriSink {
 
 impl EventSink for TauriSink {
     fn alert(&self, event: &AlertEvent) {
-        // In-app popup (modal / toast) for the running window.
+        // In-app popup (modal / toast) for the running window. Always: this is
+        // the app's own surface, not a notification budget.
         let _ = self.app.emit("mailer://alert", event);
+
+        // A configured channel is already carrying this one to wherever the
+        // user actually wants to be interrupted. Ringing here as well spends a
+        // system notification to say the same thing twice.
+        if event.routed {
+            return;
+        }
 
         // System notification even when the window is hidden.
         let (title, body) = match event.category {
@@ -87,6 +95,22 @@ pub fn run() {
             let sink = Box::new(TauriSink { app: app.handle().clone() });
             let engine = SyncEngine::new(store, sink);
             tauri::async_runtime::spawn(engine.clone().run_scheduler());
+            // A held-open IMAP connection per account, so mail arrives rather
+            // than being collected on the next tick. The scheduler above is still
+            // the floor: IDLE is not universal and connections drop.
+            tauri::async_runtime::spawn(engine.clone().run_watchers());
+            // The full-text index arrived after the mailbox did, so a database
+            // from an earlier build has mail in it that nothing has indexed.
+            // Purely local work — no endpoint, no key, no cost — so it runs
+            // itself rather than waiting to be asked.
+            tauri::async_runtime::spawn(commands::backfill_text_index(engine.clone()));
+            // Same deal for the tracker report: local, and about mail that
+            // arrived before there was anything looking.
+            tauri::async_runtime::spawn(commands::backfill_trackers(engine.clone()));
+            // And for conversations: mail stored before threading existed has
+            // no thread of its own, and the list would show it as a flat run of
+            // near-identical rows until this pass has been over it.
+            tauri::async_runtime::spawn(commands::backfill_threads(engine.clone()));
             app.manage(AppState {
                 engine,
                 index: Arc::default(),
@@ -104,6 +128,7 @@ pub fn run() {
             commands::get_message,
             commands::mark_read,
             commands::set_starred,
+            commands::set_starred_many,
             commands::delete_messages,
             commands::sync_now,
             commands::sync_statuses,
@@ -122,11 +147,31 @@ pub fn run() {
             commands::test_embedding,
             commands::get_reranker_settings,
             commands::set_reranker_settings,
+            commands::list_labels,
+            commands::label_counts,
+            commands::save_label,
+            commands::delete_label,
+            commands::get_privacy_settings,
+            commands::set_privacy_settings,
+            commands::get_reading_settings,
+            commands::set_reading_settings,
+            commands::thread_messages,
+            commands::mark_thread_read,
+            commands::prepare_draft,
+            commands::message_trackers,
+            commands::tracker_stats,
+            commands::get_mcp_servers,
+            commands::save_mcp_server,
+            commands::delete_mcp_server,
+            commands::mcp_status,
+            commands::reconnect_mcp,
             commands::index_status,
             commands::index_pending,
             commands::clear_index,
             commands::search_mail,
             commands::list_memories,
+            commands::list_memory_history,
+            commands::memory_events,
             commands::save_memory,
             commands::delete_memory,
             commands::list_conversations,

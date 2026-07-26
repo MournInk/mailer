@@ -52,9 +52,16 @@ fn transport(smtp: &SmtpConfig) -> Result<Transport> {
 }
 
 /// Send a plain-text message from `account`.
+///
+/// `bcc` is deliberately not a header. Lettre derives the SMTP envelope from
+/// the message's To/Cc/Bcc fields and then omits Bcc when serialising, so
+/// adding it here delivers the copy without telling the other recipients — a
+/// Bcc that leaks into the header is a privacy incident, not a bug report.
 pub async fn send(
     account: &AccountConfig,
     to: &[String],
+    cc: &[String],
+    bcc: &[String],
     subject: &str,
     body: &str,
     in_reply_to: Option<&str>,
@@ -63,7 +70,8 @@ pub async fn send(
         .smtp
         .as_ref()
         .ok_or_else(|| Error::InvalidConfig("该账户未配置 SMTP 发件服务器".into()))?;
-    if to.is_empty() {
+    // Cc-only or Bcc-only mail is legitimate; an empty envelope is not.
+    if to.is_empty() && cc.is_empty() && bcc.is_empty() {
         return Err(Error::InvalidConfig("收件人不能为空".into()));
     }
 
@@ -72,6 +80,12 @@ pub async fn send(
         .subject(subject);
     for recipient in to {
         builder = builder.to(mailbox(None, recipient)?);
+    }
+    for recipient in cc {
+        builder = builder.cc(mailbox(None, recipient)?);
+    }
+    for recipient in bcc {
+        builder = builder.bcc(mailbox(None, recipient)?);
     }
     // Threading: both headers carry the parent id so replying clients and
     // servers can stitch the conversation together.
@@ -208,7 +222,7 @@ mod tests {
     /// A receive-only account must fail with the documented message.
     #[tokio::test]
     async fn send_without_smtp_is_a_config_error() {
-        let err = send(&account(None), &["a@example.com".into()], "s", "b", None)
+        let err = send(&account(None), &["a@example.com".into()], &[], &[], "s", "b", None)
             .await
             .unwrap_err();
         match err {
@@ -220,7 +234,7 @@ mod tests {
     /// No recipient is caught before any connection attempt.
     #[tokio::test]
     async fn send_without_recipients_is_a_config_error() {
-        let err = send(&account(Some(smtp_config(TlsMode::Tls))), &[], "s", "b", None)
+        let err = send(&account(Some(smtp_config(TlsMode::Tls))), &[], &[], &[], "s", "b", None)
             .await
             .unwrap_err();
         assert!(matches!(err, Error::InvalidConfig(_)), "got {err:?}");
@@ -232,6 +246,8 @@ mod tests {
         let err = send(
             &account(Some(smtp_config(TlsMode::Tls))),
             &["not-an-address".into()],
+            &[],
+            &[],
             "s",
             "b",
             None,

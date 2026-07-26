@@ -12,7 +12,17 @@ export type SyncPhase = "idle" | "connecting" | "fetching" | "classifying" | "er
 export type AiProvider = "openai-compatible" | "openai-responses" | "anthropic" | "gemini";
 export type RerankerKind = "none" | "rerank-api" | "llm-scoring";
 export type MemoryKind = "preference" | "fact" | "contact";
+/** Whether a memory still describes the user, or is kept as history. */
+export type MemoryStatus = "active" | "superseded";
+/** Who wrote it. The reconciler never overwrites what the user typed. */
+export type MemoryOrigin = "user" | "assistant";
+/** How to reach an external MCP server. */
+export type McpTransport = "http" | "stdio";
+/** How the key reaches an HTTP MCP server. There is no standard. */
+export type McpAuth = "none" | "bearer" | "api-key-header";
 export type ChatRole = "user" | "assistant" | "tool";
+/** Why one remote reference in a mail is worth naming. */
+export type TrackerKind = "known" | "pixel" | "remote";
 
 export interface AccountPublic {
   id: string;
@@ -65,6 +75,33 @@ export interface AiAnalysis {
   verificationCode: string | null;
   deletable: boolean;
   reason: string;
+  /** names of the user's own labels the model judged to apply */
+  labels: string[];
+}
+
+/** A category the user described in their own words. */
+export interface MailLabel {
+  id: string;
+  name: string;
+  /** how to recognise it, in plain language — this is what the model reads */
+  instruction: string;
+  colorHue: number;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export interface LabelInput {
+  id?: string | null;
+  name: string;
+  instruction: string;
+  colorHue: number;
+  enabled: boolean;
+}
+
+export interface LabelCount {
+  labelId: string;
+  total: number;
+  unread: number;
 }
 
 export interface AttachmentMeta {
@@ -79,10 +116,16 @@ export interface EmailMessage {
   folder: string;
   uid: string;
   messageId: string | null;
+  /** every ancestor this message cites, oldest first */
+  references: string[];
+  /** the conversation it belongs to; assigned by the store on insert */
+  threadId: string;
   subject: string;
   fromName: string;
   fromAddr: string;
   toAddrs: string[];
+  /** Cc header — needed to answer a thread without dropping anyone */
+  ccAddrs: string[];
   date: number;
   snippet: string;
   bodyText: string | null;
@@ -110,12 +153,18 @@ export interface MessageHeader {
   category: Category | null;
   verificationCode: string | null;
   summary: string | null;
+  /** the conversation this row stands for */
+  threadId: string;
+  /** messages in that conversation *within the current filter*; 1 when alone */
+  threadCount: number;
 }
 
 export interface MessageQuery {
   accountId?: string | null;
   folder?: string | null;
   category?: Category | null;
+  /** one of the user's own labels */
+  labelId?: string | null;
   unreadOnly?: boolean;
   starredOnly?: boolean;
   search?: string | null;
@@ -193,6 +242,103 @@ export interface RerankerSettingsInput {
   topN: number;
 }
 
+/** One external MCP server, as stored. Mirrors `McpServerPublic`. */
+export interface McpServerPublic {
+  id: string;
+  /** Also the namespace its tools are offered under. */
+  name: string;
+  transport: McpTransport;
+  url: string;
+  auth: McpAuth;
+  hasApiKey: boolean;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface McpServerInput {
+  id?: string | null;
+  name: string;
+  transport: McpTransport;
+  url: string;
+  auth: McpAuth;
+  /** empty/undefined keeps the stored key */
+  apiKey?: string | null;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface McpToolInfo {
+  /** What the model calls, e.g. `mcp__exa__web_search_exa`. */
+  name: string;
+  /** What the server calls it. */
+  remoteName: string;
+  description: string;
+}
+
+export interface McpServerStatus {
+  id: string;
+  serverName: string;
+  serverVersion: string;
+  protocolVersion: string;
+  tools: McpToolInfo[];
+  error: string | null;
+}
+
+/** One host a message wanted to reach, and how many times. */
+export interface TrackerHit {
+  host: string;
+  kind: TrackerKind;
+  count: number;
+}
+
+export interface TrackerDay {
+  /** `YYYY-MM-DD`, local time. */
+  day: string;
+  /** requests blocked that day, tracking kinds only */
+  blocked: number;
+  /** messages that carried at least one */
+  messages: number;
+}
+
+export interface TrackerStats {
+  days: TrackerDay[];
+  top: TrackerHit[];
+  blocked: number;
+  messages: number;
+}
+
+/** One fragment of an answer being written. */
+export interface AssistantDelta {
+  conversationId: string;
+  text: string;
+}
+
+export interface PrivacySettings {
+  /** refuse remote content until asked, per message. Default true. */
+  blockTrackers: boolean;
+}
+
+export interface DraftPrefill {
+  accountId: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+  inReplyTo: string | null;
+}
+
+/** Which composer a message action opens. */
+export type DraftKind = "reply" | "reply_all" | "forward";
+
+export interface ReadingSettings {
+  /** show a reply chain as one row instead of one per message. Default true. */
+  groupThreads: boolean;
+}
+
 export interface NotifyChannel {
   id: string;
   name: string;
@@ -212,6 +358,8 @@ export interface SyncStatus {
 }
 
 export interface AlertEvent {
+  /** an external channel is already carrying this one */
+  routed: boolean;
   messageId: string;
   category: Category;
   accountEmail: string;
@@ -226,6 +374,17 @@ export interface TestResult {
   message: string;
 }
 
+/**
+ * What a delete attempt actually managed to do. The list hides rows before the
+ * request is made, so `failed` is how it learns which ones to put back.
+ */
+export interface DeleteReport {
+  deleted: string[];
+  failed: string[];
+  /** Why, in one line. Set iff `failed` is non-empty. */
+  error: string | null;
+}
+
 export interface CategoryCount {
   category: string; // Category | "pending"
   total: number;
@@ -235,6 +394,10 @@ export interface CategoryCount {
 export interface OutgoingMail {
   accountId: string;
   to: string[];
+  /** visible copies — everyone on the thread sees these */
+  cc: string[];
+  /** blind copies — delivered via the envelope, never written as a header */
+  bcc: string[];
   subject: string;
   body: string;
   inReplyTo?: string | null;
@@ -258,6 +421,10 @@ export interface SearchHit {
 export interface IndexStatus {
   indexed: number;
   total: number;
+  /** starred messages whose whole body has been chunked and embedded */
+  deepIndexed: number;
+  /** starred messages, i.e. what the deep index is working toward */
+  deepTotal: number;
   model: string;
   /** true while a backfill is running */
   building: boolean;
@@ -272,8 +439,31 @@ export interface MemoryEntry {
   text: string;
   /** a message id, or "assistant" when inferred */
   source: string | null;
+  status: MemoryStatus;
+  origin: MemoryOrigin;
+  /** the memory that replaced this one, when it was superseded */
+  supersededBy: string | null;
+  /** when what it says started being true, as far as we know */
+  validFrom: number | null;
+  /** when it stopped being true; null while it is still believed */
+  validTo: number | null;
+  /** answers this has been injected into — the eviction signal */
+  useCount: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** One thing that happened to one memory. */
+export interface MemoryEvent {
+  id: string;
+  memoryId: string;
+  /** add / update / supersede / noop / delete */
+  op: string;
+  beforeText: string | null;
+  afterText: string | null;
+  /** the reconciler's own short justification, when a model made the call */
+  reason: string | null;
+  createdAt: number;
 }
 
 /** Form payload for save_memory. */
@@ -350,6 +540,31 @@ export const RERANKER_KIND_LABEL: Record<RerankerKind, string> = {
   none: "不重排（按向量相似度）",
   "rerank-api": "重排接口（Jina / Cohere 等）",
   "llm-scoring": "让对话模型打分",
+};
+
+export const MCP_TRANSPORT_LABEL: Record<McpTransport, string> = {
+  http: "远程 HTTP（Streamable HTTP）",
+  stdio: "本地进程（stdio）",
+};
+
+export const MCP_AUTH_LABEL: Record<McpAuth, string> = {
+  none: "无需鉴权",
+  bearer: "Authorization: Bearer",
+  "api-key-header": "x-api-key 请求头",
+};
+
+export const TRACKER_KIND_LABEL: Record<TrackerKind, string> = {
+  known: "追踪服务",
+  pixel: "追踪像素",
+  remote: "远程资源",
+};
+
+export const MEMORY_OP_LABEL: Record<string, string> = {
+  add: "新增",
+  update: "补全",
+  supersede: "替换",
+  noop: "已存在",
+  delete: "删除",
 };
 
 export const MEMORY_KIND_LABEL: Record<MemoryKind, string> = {

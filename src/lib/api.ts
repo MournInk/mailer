@@ -13,25 +13,40 @@ import type {
   AiSettingsInput,
   AiSettingsPublic,
   AlertEvent,
+  AssistantDelta,
   AssistantReply,
   CategoryCount,
   ChatTurn,
   Conversation,
+  DeleteReport,
   EmailMessage,
   EmbeddingSettingsInput,
   EmbeddingSettingsPublic,
   IndexStatus,
+  LabelCount,
+  LabelInput,
+  MailLabel,
+  McpServerInput,
+  McpServerPublic,
+  McpServerStatus,
   MemoryEntry,
+  MemoryEvent,
   MemoryInput,
   MessagePage,
   MessageQuery,
   NotifyChannel,
   OutgoingMail,
+  DraftKind,
+  DraftPrefill,
+  PrivacySettings,
+  ReadingSettings,
   RerankerSettingsInput,
   RerankerSettingsPublic,
   SearchHit,
   SyncStatus,
   TestResult,
+  TrackerHit,
+  TrackerStats,
 } from "./types";
 
 // -- shell ------------------------------------------------------------------
@@ -57,8 +72,15 @@ export const markRead = (ids: string[], read: boolean) =>
   invoke<void>("mark_read", { ids, read });
 export const setStarred = (id: string, starred: boolean) =>
   invoke<void>("set_starred", { id, starred });
+/** Star or unstar a whole selection in one transaction. */
+export const setStarredMany = (ids: string[], starred: boolean) =>
+  invoke<void>("set_starred_many", { ids, starred });
+/**
+ * Delete messages. Resolves with what actually went — a server that refused
+ * still has the mail, and the caller has to restore those rows.
+ */
 export const deleteMessages = (ids: string[], onServer: boolean) =>
-  invoke<void>("delete_messages", { ids, onServer });
+  invoke<DeleteReport>("delete_messages", { ids, onServer });
 export const syncNow = (accountId?: string | null) =>
   invoke<void>("sync_now", { accountId: accountId ?? null });
 export const syncStatuses = () => invoke<SyncStatus[]>("sync_statuses");
@@ -98,6 +120,58 @@ export const getRerankerSettings = () =>
 export const setRerankerSettings = (input: RerankerSettingsInput) =>
   invoke<RerankerSettingsPublic>("set_reranker_settings", { input });
 
+// -- MCP servers (tools the assistant borrows) ------------------------------
+
+export const getMcpServers = () => invoke<McpServerPublic[]>("get_mcp_servers");
+export const saveMcpServer = (input: McpServerInput) =>
+  invoke<McpServerPublic[]>("save_mcp_server", { input });
+export const deleteMcpServer = (id: string) =>
+  invoke<McpServerPublic[]>("delete_mcp_server", { id });
+/**
+ * Connect to every enabled server and report what each one offers. This is the
+ * test button and the status list at once — there is nothing else to test about
+ * an MCP server than whether it connects and what tools it has.
+ */
+export const mcpStatus = () => invoke<McpServerStatus[]>("mcp_status");
+/** Drop every cached session and connect again from scratch. */
+export const reconnectMcp = () => invoke<McpServerStatus[]>("reconnect_mcp");
+
+// -- labels -----------------------------------------------------------------
+
+export const listLabels = () => invoke<MailLabel[]>("list_labels");
+export const labelCounts = () => invoke<LabelCount[]>("label_counts");
+export const saveLabel = (input: LabelInput) => invoke<MailLabel[]>("save_label", { input });
+export const deleteLabel = (id: string) => invoke<MailLabel[]>("delete_label", { id });
+
+// -- reading / threading ----------------------------------------------------
+
+export const getReadingSettings = () => invoke<ReadingSettings>("get_reading_settings");
+export const setReadingSettings = (input: ReadingSettings) =>
+  invoke<ReadingSettings>("set_reading_settings", { input });
+/** Every message in one conversation, oldest first. */
+export const threadMessages = (threadId: string) =>
+  invoke<EmailMessage[]>("thread_messages", { threadId });
+/**
+ * What replying to (or forwarding) a message should put in the composer.
+ * The recipient set is computed in Rust — see `mailer_core::reply`.
+ */
+export const prepareDraft = (id: string, kind: DraftKind, when: string) =>
+  invoke<DraftPrefill>("prepare_draft", { id, kind, when });
+/** Mark a whole conversation read; returns how many messages changed. */
+export const markThreadRead = (threadId: string, read: boolean) =>
+  invoke<number>("mark_thread_read", { threadId, read });
+
+// -- privacy / trackers -----------------------------------------------------
+
+export const getPrivacySettings = () => invoke<PrivacySettings>("get_privacy_settings");
+export const setPrivacySettings = (input: PrivacySettings) =>
+  invoke<PrivacySettings>("set_privacy_settings", { input });
+/** What one message wanted to load from somebody else's server. */
+export const messageTrackers = (id: string) =>
+  invoke<TrackerHit[]>("message_trackers", { id });
+/** The heatmap, the worst offenders, and the totals behind them. */
+export const trackerStats = () => invoke<TrackerStats>("tracker_stats");
+
 export const indexStatus = () => invoke<IndexStatus>("index_status");
 /**
  * Start the backfill and return the progress at that moment; it keeps running
@@ -115,6 +189,11 @@ export const searchMail = (query: string, limit?: number) =>
 // -- memory -----------------------------------------------------------------
 
 export const listMemories = () => invoke<MemoryEntry[]>("list_memories");
+/** Memories that stopped being true. Never injected; history only. */
+export const listMemoryHistory = () => invoke<MemoryEntry[]>("list_memory_history");
+/** What happened to one memory, or to the memory as a whole when `id` is absent. */
+export const memoryEvents = (id?: string) =>
+  invoke<MemoryEvent[]>("memory_events", { id: id ?? null });
 export const saveMemory = (input: MemoryInput) =>
   invoke<MemoryEntry>("save_memory", { input });
 export const deleteMemory = (id: string) => invoke<void>("delete_memory", { id });
@@ -156,4 +235,18 @@ export function onSyncStatus(cb: (s: SyncStatus) => void): Promise<UnlistenFn> {
 /** Progress of the embedding backfill, pushed after every batch. */
 export function onIndexStatus(cb: (s: IndexStatus) => void): Promise<UnlistenFn> {
   return listen<IndexStatus>("mailer://index-status", (ev) => cb(ev.payload));
+}
+
+/**
+ * Fragments of an assistant answer, in order, as the model writes them.
+ *
+ * Tagged with the conversation, because a panel that has been reset must not
+ * append text belonging to the question it stopped waiting for. What arrives here
+ * is provisional: a round that streams prose and then calls a tool has streamed
+ * something that is not the answer, so `assistantAsk`'s reply replaces it.
+ */
+export function onAssistantDelta(
+  cb: (d: AssistantDelta) => void,
+): Promise<UnlistenFn> {
+  return listen<AssistantDelta>("mailer://assistant-delta", (ev) => cb(ev.payload));
 }

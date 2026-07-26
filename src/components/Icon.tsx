@@ -148,6 +148,40 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
     </>
   ),
+  tag: (
+    <>
+      <path d="M3 5a2 2 0 0 1 2-2h5.2a2 2 0 0 1 1.4.6l8.4 8.4a2 2 0 0 1 0 2.8l-5.2 5.2a2 2 0 0 1-2.8 0L3.6 11.6A2 2 0 0 1 3 10.2z" />
+      <circle cx="7.5" cy="7.5" r="1.3" />
+    </>
+  ),
+  chart: (
+    <>
+      <path d="M3 3v16a2 2 0 0 0 2 2h16" />
+      <rect x="7" y="12" width="3" height="5" rx="1" />
+      <rect x="13" y="8" width="3" height="9" rx="1" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3.5 2" />
+    </>
+  ),
+  terminal: (
+    <>
+      <path d="m7 9 3 3-3 3" />
+      <path d="M13 15h4" />
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+    </>
+  ),
+  plug: (
+    <>
+      <path d="M9 2v6" />
+      <path d="M15 2v6" />
+      <path d="M6 8h12v3a6 6 0 0 1-12 0z" />
+      <path d="M12 17v5" />
+    </>
+  ),
   copy: (
     <>
       <rect x="8" y="8" width="14" height="14" rx="2" />
@@ -159,6 +193,21 @@ const PATHS: Record<string, React.ReactNode> = {
     <>
       <path d="m9 17-5-5 5-5" />
       <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+    </>
+  ),
+  /* Two arrowheads over one shaft: the reply glyph, said twice. */
+  "reply-all": (
+    <>
+      <path d="m7 17-5-5 5-5" />
+      <path d="m12 17-5-5 5-5" />
+      <path d="M22 18v-2a4 4 0 0 0-4-4H7" />
+    </>
+  ),
+  /* The reply glyph mirrored — the same motion, pointing away. */
+  forward: (
+    <>
+      <path d="m15 17 5-5-5-5" />
+      <path d="M4 18v-2a4 4 0 0 1 4-4h12" />
     </>
   ),
   code: (

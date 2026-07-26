@@ -13,8 +13,10 @@ use std::collections::HashSet;
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use async_imap::error::Error as ImapError;
+use async_imap::extensions::idle::IdleResponse;
 use async_imap::imap_proto::{Response, Status};
 use async_imap::{Client, Session};
 use futures::TryStreamExt;
@@ -172,6 +174,72 @@ async fn select(
         .select(folder)
         .await
         .map_err(|e| Error::Imap(format!("选择邮箱 {folder} 失败: {e}")))
+}
+
+/// Hold a connection open until the server says the mailbox changed.
+///
+/// This is what makes mail arrive rather than being collected: a poll on a
+/// five-minute timer means a verification code can be four minutes late, and no
+/// interval short enough to fix that is one a server will tolerate.
+///
+/// RFC 2177 requires the client to re-issue IDLE at least every 29 minutes;
+/// `timeout` is the caller's shorter version of that, because a NAT that silently
+/// drops an idle connection is more common than a server that complains.
+///
+/// A server with no IDLE capability answers [`Watch::Unsupported`] rather than an
+/// error: it is a fact about the server, not a failure, and the caller's response
+/// is to stop asking rather than to retry.
+pub async fn wait_for_mail(account: &AccountConfig, timeout: Duration) -> Result<Watch> {
+    let mut session = login(account).await?;
+
+    if !session.capabilities().await.map(|c| c.has_str("IDLE")).unwrap_or(false) {
+        // The session is still good; end it cleanly before reporting.
+        let _ = logout(&mut session).await;
+        return Ok(Watch::Unsupported);
+    }
+
+    // IDLE reports on the selected mailbox and nothing else.
+    select(&mut session, INBOX).await?;
+
+    let mut handle = session.idle();
+    handle
+        .init()
+        .await
+        .map_err(|e| Error::Imap(format!("进入 IDLE 失败: {e}")))?;
+
+    let outcome = {
+        let (wait, _stop) = handle.wait_with_timeout(timeout);
+        wait.await
+    };
+
+    // Leave IDLE and log out even when the wait failed: an abandoned connection
+    // holds a server-side slot, and providers cap those per account.
+    let ended = handle.done().await;
+    match ended {
+        Ok(mut session) => {
+            let _ = logout(&mut session).await;
+        }
+        Err(e) => tracing::debug!("imap: 退出 IDLE 时出错: {e}"),
+    }
+
+    match outcome {
+        Ok(IdleResponse::NewData(_)) => Ok(Watch::Changed),
+        // A manual interrupt is this app deciding to stop waiting, which is the
+        // same as no news as far as the caller is concerned.
+        Ok(IdleResponse::Timeout | IdleResponse::ManualInterrupt) => Ok(Watch::Quiet),
+        Err(e) => Err(Error::Imap(format!("IDLE 等待失败: {e}"))),
+    }
+}
+
+/// How one wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watch {
+    /// The server said the mailbox changed. Sync now.
+    Changed,
+    /// The wait ended with no news. Wait again.
+    Quiet,
+    /// This server does not do IDLE. Stop waiting on it and let the timer work.
+    Unsupported,
 }
 
 /// LOGOUT. Best-effort in spirit, but a failure here still means the session

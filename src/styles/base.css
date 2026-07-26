@@ -72,15 +72,16 @@ a {
 }
 
 /* -- scrollbars -----------------------------------------------------------
-   Overlay, not reserved: a permanent gutter steals width from every column and
-   draws a hard edge down the side of the app. The track is transparent and the
-   thumb only appears once the pointer is over the scrolling area or it is
-   actually moving, which is what the platform scrollbars on macOS and mobile
-   already do.
+   Thin, and only where a native bar is unavoidable.
 
-   `scrollbar-gutter: stable` is deliberately NOT set — reserving the space is
-   the thing being avoided. Content shifting by a few pixels when a list grows
-   past the fold is the accepted cost. */
+   WebKit and Chromium both *reserve* the width given to `::-webkit-scrollbar`
+   whether or not a thumb is painted, so a transparent-until-hover track is
+   still a permanent empty strip down the right edge of every column — and it
+   pushes the content it sits beside off centre. The long scrollers therefore use
+   `OverlayScroll`, which hides the native bar and floats its own over the
+   content. What is left here is the fallback for small incidental scrollers
+   (a textarea, a code block, a table): as thin as the platform allows, and
+   invisible until the pointer is in the area. */
 * {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
@@ -92,14 +93,11 @@ a {
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
+::-webkit-scrollbar-track,
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
@@ -107,26 +105,19 @@ a {
 ::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: 999px;
-  border: 2px solid transparent;
+  border: 1px solid transparent;
   background-clip: padding-box;
   transition: background var(--dur-base) var(--ease-out);
 }
 
-/* The thumb belongs to the hovered scroll container, so it is scoped to a
-   hovered ancestor rather than applied globally. */
 *:hover::-webkit-scrollbar-thumb,
 *:focus-within::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  background: color-mix(in srgb, var(--ink) 24%, transparent);
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--ink) 38%, transparent);
-  background-clip: padding-box;
-}
-
-::-webkit-scrollbar-thumb:active {
-  background: color-mix(in srgb, var(--ink) 50%, transparent);
+  background: color-mix(in srgb, var(--ink) 40%, transparent);
   background-clip: padding-box;
 }
 

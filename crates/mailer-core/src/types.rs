@@ -160,6 +160,11 @@ pub struct AiAnalysis {
     pub deletable: bool,
     /// Short model-provided justification (debugging / transparency UI).
     pub reason: String,
+    /// Names of the user's own labels the model judged to apply. Empty is the
+    /// normal answer. Stored alongside the analysis so a list row can show them
+    /// without a join; the authoritative link is `message_labels`.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,10 +187,22 @@ pub struct EmailMessage {
     pub uid: String,
     /// RFC 5322 Message-ID header, used for cross-protocol dedup.
     pub message_id: Option<String>,
+    /// Every ancestor this message cites, oldest first — `References` plus
+    /// `In-Reply-To`, deduped and unwrapped. The raw material for threading.
+    #[serde(default)]
+    pub references: Vec<String>,
+    /// The conversation this message belongs to. Assigned by the store on
+    /// insert; a message that starts a thread carries its own id here.
+    #[serde(default)]
+    pub thread_id: String,
     pub subject: String,
     pub from_name: String,
     pub from_addr: String,
     pub to_addrs: Vec<String>,
+    /// Cc header. Needed to answer a group thread without dropping people —
+    /// which is why it is parsed and stored rather than discarded.
+    #[serde(default)]
+    pub cc_addrs: Vec<String>,
     /// Date header as unix milliseconds.
     pub date: i64,
     /// Plain-text preview (~140 chars).
@@ -219,6 +236,14 @@ pub struct MessageHeader {
     pub category: Option<Category>,
     pub verification_code: Option<String>,
     pub summary: Option<String>,
+    /// The conversation this row stands for.
+    #[serde(default)]
+    pub thread_id: String,
+    /// How many messages the conversation holds *within the current filter*.
+    /// 1 for a mail with no replies — and for every row when the list is not
+    /// grouping, so the UI can render a count without asking whether it is.
+    #[serde(default)]
+    pub thread_count: u32,
 }
 
 /// Query filter for the message list.
@@ -228,10 +253,14 @@ pub struct MessageQuery {
     pub account_id: Option<String>,
     pub folder: Option<String>,
     pub category: Option<Category>,
+    /// One of the user's own labels.
+    pub label_id: Option<String>,
     pub unread_only: bool,
     pub starred_only: bool,
     /// Substring search over subject / sender / snippet.
     pub search: Option<String>,
+    /// Collapse each conversation to its newest matching message.
+    pub group_threads: bool,
     pub limit: u32,
     pub offset: u32,
 }
@@ -419,6 +448,12 @@ pub struct SyncStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertEvent {
+    /// True when an external channel (Telegram, Bark, webhook…) is already
+    /// carrying this alert. The desktop shell uses it to skip its own system
+    /// notification — two buzzes for one mail is one too many, and the user
+    /// configured the channel precisely so the phone would be the one to ring.
+    #[serde(default)]
+    pub routed: bool,
     pub message_id: String,
     pub category: Category,
     pub account_email: String,
@@ -426,6 +461,29 @@ pub struct AlertEvent {
     pub subject: String,
     pub summary: String,
     pub verification_code: Option<String>,
+}
+
+/// What a delete attempt actually managed to do.
+///
+/// Deleting on the server is a network round trip that can fail, and the UI
+/// hides the row before it starts. So it has to be told, per message, whether
+/// the deletion stuck — a row it hid on a request the server refused has to
+/// come back.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteReport {
+    /// Gone: hidden locally, and removed on the server when that was asked for.
+    pub deleted: Vec<String>,
+    /// Left exactly as they were, because the server refused.
+    pub failed: Vec<String>,
+    /// Why, in one line the user can read. Set iff `failed` is non-empty.
+    pub error: Option<String>,
+}
+
+impl DeleteReport {
+    pub fn ok(&self) -> bool {
+        self.failed.is_empty()
+    }
 }
 
 /// Result of a connectivity test (account or channel).
@@ -442,6 +500,12 @@ pub struct TestResult {
 pub struct OutgoingMail {
     pub account_id: String,
     pub to: Vec<String>,
+    /// Visible copies. Everyone on the thread sees these.
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Blind copies. Never written into a header — see `smtp::send`.
+    #[serde(default)]
+    pub bcc: Vec<String>,
     pub subject: String,
     pub body: String,
     /// Message id being replied to, if any (sets In-Reply-To).
@@ -640,10 +704,310 @@ pub struct SearchHit {
 pub struct IndexStatus {
     pub indexed: u32,
     pub total: u32,
+    /// Starred messages whose whole body has been chunked and embedded.
+    pub deep_indexed: u32,
+    /// Starred messages, i.e. how many the deep index is working toward.
+    pub deep_total: u32,
     pub model: String,
     /// Set while a backfill is running.
     pub building: bool,
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// User-defined labels
+// ---------------------------------------------------------------------------
+
+/// A category the user described in their own words.
+///
+/// The four built-in categories are about what mail *is* — a code, a bill, a
+/// blast. They cannot express what it is about *to this person*: 候选人简历,
+/// 房东通知, 报销单据. Those are different for everyone, which is why the
+/// definition is a sentence the user writes rather than a rule they build.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MailLabel {
+    pub id: String,
+    /// What it is called. Also what the model is asked to answer with, so it has
+    /// to mean something on its own.
+    pub name: String,
+    /// How to recognise it, in the user's own words. This is the whole feature.
+    pub instruction: String,
+    pub color_hue: u16,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+impl Default for MailLabel {
+    fn default() -> Self {
+        MailLabel {
+            id: String::new(),
+            name: String::new(),
+            instruction: String::new(),
+            color_hue: 210,
+            enabled: true,
+            created_at: 0,
+        }
+    }
+}
+
+/// One label plus how much mail is under it, for the sidebar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelCount {
+    pub label_id: String,
+    pub total: u32,
+    pub unread: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Trackers
+// ---------------------------------------------------------------------------
+
+/// Why one remote reference in a mail is worth naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackerKind {
+    /// A host whose business is knowing you opened the mail.
+    Known,
+    /// An image nobody is meant to see: 1×1, zero-sized, or hidden.
+    Pixel,
+    /// An ordinary remote resource. Still a request that reports the open, which
+    /// is why it is blocked — but there is no evidence it was put there to.
+    Remote,
+}
+
+impl TrackerKind {
+    /// True for the two kinds that are actually tracking, as opposed to merely
+    /// remote. What the counts and the heatmap are about.
+    pub fn is_tracker(self) -> bool {
+        matches!(self, TrackerKind::Known | TrackerKind::Pixel)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrackerKind::Known => "known",
+            TrackerKind::Pixel => "pixel",
+            TrackerKind::Remote => "remote",
+        }
+    }
+
+    pub fn parse(s: &str) -> TrackerKind {
+        match s {
+            "known" => TrackerKind::Known,
+            "pixel" => TrackerKind::Pixel,
+            _ => TrackerKind::Remote,
+        }
+    }
+}
+
+/// One host a message wanted to reach, and how many times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerHit {
+    pub host: String,
+    pub kind: TrackerKind,
+    pub count: u32,
+}
+
+/// One day of the heatmap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerDay {
+    /// `YYYY-MM-DD`, local time — the day the user would call it.
+    pub day: String,
+    /// Requests blocked that day, counting only the tracking kinds.
+    pub blocked: u32,
+    /// Messages that carried at least one.
+    pub messages: u32,
+}
+
+/// The privacy summary the settings screen shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerStats {
+    pub days: Vec<TrackerDay>,
+    /// The worst offenders over the same window, most requests first.
+    pub top: Vec<TrackerHit>,
+    /// Totals over the window.
+    pub blocked: u32,
+    pub messages: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PrivacySettings {
+    /// Refuse remote content in mail until the user asks for it, per message.
+    /// On by default: a mail client that phones home for every message it shows
+    /// is the behaviour being fixed, not a preference.
+    pub block_trackers: bool,
+}
+
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        PrivacySettings { block_trackers: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReadingSettings {
+    /// Show a reply chain as one row instead of one row per message. On by
+    /// default — but a real preference, not a fix: plenty of people read mail
+    /// as a stream and find a collapsed conversation actively worse.
+    pub group_threads: bool,
+}
+
+impl Default for ReadingSettings {
+    fn default() -> Self {
+        ReadingSettings { group_threads: true }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MCP (outbound: servers this app connects to as a client)
+// ---------------------------------------------------------------------------
+
+/// How to reach one MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpTransport {
+    /// Streamable HTTP: one URL, POST per request, answers in JSON or SSE.
+    Http,
+    /// A local process speaking newline-delimited JSON over stdin/stdout.
+    Stdio,
+}
+
+impl Default for McpTransport {
+    fn default() -> Self {
+        McpTransport::Http
+    }
+}
+
+/// How a secret reaches an HTTP MCP server. There is no standard: GitHub wants
+/// a bearer token, Exa wants `x-api-key`, and a server behind a gateway may want
+/// neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpAuth {
+    None,
+    /// `Authorization: Bearer <key>`
+    Bearer,
+    /// `x-api-key: <key>`
+    ApiKeyHeader,
+}
+
+impl Default for McpAuth {
+    fn default() -> Self {
+        McpAuth::None
+    }
+}
+
+/// One external MCP server the user configured.
+///
+/// The `name` is not decoration: it is the namespace the server's tools are
+/// offered to the model under, so two servers with a `search` tool stay
+/// distinguishable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub transport: McpTransport,
+    /// HTTP only. The full endpoint, e.g. `https://mcp.exa.ai/mcp`.
+    pub url: String,
+    /// HTTP only.
+    pub auth: McpAuth,
+    /// HTTP only. Never leaves the machine except as the header `auth` names.
+    pub api_key: String,
+    /// stdio only. The executable to run.
+    pub command: String,
+    /// stdio only.
+    pub args: Vec<String>,
+    /// stdio only. Added to the inherited environment.
+    pub env: std::collections::BTreeMap<String, String>,
+    pub enabled: bool,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        McpServerConfig {
+            id: String::new(),
+            name: String::new(),
+            transport: McpTransport::Http,
+            url: String::new(),
+            auth: McpAuth::None,
+            api_key: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            enabled: true,
+        }
+    }
+}
+
+/// A server config as the UI sees it: the key is replaced by whether there is
+/// one, exactly as the AI and reranker settings do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerPublic {
+    pub id: String,
+    pub name: String,
+    pub transport: McpTransport,
+    pub url: String,
+    pub auth: McpAuth,
+    pub has_api_key: bool,
+    pub command: String,
+    pub args: Vec<String>,
+    /// Variable names only — every value is blanked. A stdio server is
+    /// configured by handing it credentials (`GITHUB_TOKEN`, `EXA_API_KEY`),
+    /// so this map is as secret as `api_key` and is redacted the same way.
+    /// The names stay because the form has to show which ones are set.
+    pub env: std::collections::BTreeMap<String, String>,
+    pub enabled: bool,
+}
+
+impl From<&McpServerConfig> for McpServerPublic {
+    fn from(s: &McpServerConfig) -> Self {
+        McpServerPublic {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            transport: s.transport,
+            url: s.url.clone(),
+            auth: s.auth,
+            has_api_key: !s.api_key.is_empty(),
+            command: s.command.clone(),
+            args: s.args.clone(),
+            env: s.env.keys().map(|k| (k.clone(), String::new())).collect(),
+            enabled: s.enabled,
+        }
+    }
+}
+
+/// What one server is currently good for, for the settings screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub id: String,
+    /// The name the server calls itself, which is often not the one the user
+    /// typed.
+    pub server_name: String,
+    pub server_version: String,
+    pub protocol_version: String,
+    /// Tools the assistant can now call, fully qualified.
+    pub tools: Vec<McpToolInfo>,
+    /// Why the last attempt failed, if it did.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInfo {
+    /// The name the model calls, e.g. `mcp__exa__web_search_exa`.
+    pub name: String,
+    /// The name on the server.
+    pub remote_name: String,
+    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -661,16 +1025,96 @@ pub enum MemoryKind {
     Contact,
 }
 
+/// Whether a memory still describes the user.
+///
+/// A retired memory is kept, not deleted: an email client has to be able to show
+/// why it believed something, and the user has to be able to see that a
+/// preference changed rather than finding it silently gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryStatus {
+    /// Injected into prompts and searched.
+    Active,
+    /// Replaced by something newer. History only.
+    Superseded,
+}
+
+impl Default for MemoryStatus {
+    fn default() -> Self {
+        MemoryStatus::Active
+    }
+}
+
+/// Who wrote a memory. The reconciler may retire what it wrote itself, but it
+/// may never overwrite what the user typed by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryOrigin {
+    User,
+    Assistant,
+}
+
+impl Default for MemoryOrigin {
+    fn default() -> Self {
+        MemoryOrigin::Assistant
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct MemoryEntry {
     pub id: String,
     pub kind: MemoryKind,
     pub text: String,
     /// Where it came from — a message id, or "assistant" when inferred.
     pub source: Option<String>,
+    pub status: MemoryStatus,
+    pub origin: MemoryOrigin,
+    /// The id that replaced this one, when it was superseded.
+    pub superseded_by: Option<String>,
+    /// When what this says started being true, as far as we know. Distinct from
+    /// `created_at`, which is when we came to believe it.
+    pub valid_from: Option<i64>,
+    /// When it stopped being true. `None` on an active memory.
+    pub valid_to: Option<i64>,
+    /// How many answers this has been injected into. The eviction signal.
+    pub use_count: u32,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl Default for MemoryEntry {
+    fn default() -> Self {
+        MemoryEntry {
+            id: String::new(),
+            kind: MemoryKind::Fact,
+            text: String::new(),
+            source: None,
+            status: MemoryStatus::Active,
+            origin: MemoryOrigin::Assistant,
+            superseded_by: None,
+            valid_from: None,
+            valid_to: None,
+            use_count: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+}
+
+/// One thing that happened to one memory, for the audit trail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEvent {
+    pub id: String,
+    pub memory_id: String,
+    /// `add` / `update` / `supersede` / `noop` / `delete`.
+    pub op: String,
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
+    /// The reconciler's own short justification, when a model made the call.
+    pub reason: Option<String>,
+    pub created_at: i64,
 }
 
 // ---------------------------------------------------------------------------

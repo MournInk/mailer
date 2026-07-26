@@ -27,6 +27,42 @@ const TICK: Duration = Duration::from_secs(20);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// Ceiling on a server-side delete round trip.
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one IDLE waits before re-issuing it. RFC 2177 allows 29 minutes;
+/// nine keeps the connection well inside the idle timeout of the NATs and
+/// load balancers that sit between a laptop and a mail server.
+const IDLE_WINDOW: Duration = Duration::from_secs(9 * 60);
+/// How often the watcher looks for accounts it is not watching yet.
+const WATCH_RESCAN: Duration = Duration::from_secs(60);
+/// Backoff bounds for a connection that keeps failing. The floor is short
+/// because the common cause is a network that just came back.
+const WATCH_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const WATCH_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
+/// Room on top of `IDLE_WINDOW` for the connect, login and teardown around it.
+const WATCH_SLACK: Duration = Duration::from_secs(60);
+/// How long any one external channel may hold up the local alert.
+///
+/// The desktop notification is suppressed only when a channel actually took
+/// delivery, which means the answer has to be known before the popup — but an
+/// unreachable channel sits on the HTTP client's own minute-long timeout, and
+/// the local notification would then be late in precisely the case where it is
+/// the only one left. Past this budget the alert goes out as unrouted: a
+/// duplicate is a far smaller failure than silence.
+///
+/// Per channel, and the channels run concurrently, so this is the wait for the
+/// whole phase however many are configured. Bounding the phase around a serial
+/// loop instead would let one dead webhook cancel the loop before Telegram or
+/// Bark were tried at all.
+const NOTIFY_BUDGET: Duration = Duration::from_secs(5);
+
+/// Whether an account can be watched live.
+///
+/// POP3 has no IDLE and no equivalent — the protocol has no way to tell a client
+/// anything it did not ask for. And `sync_interval_secs == 0` is the user
+/// switching automatic mail off, which a held-open connection would be exactly
+/// the opposite of.
+fn watchable(account: &AccountConfig) -> bool {
+    account.protocol == Protocol::Imap && account.sync_interval_secs > 0
+}
 
 /// Bound one protocol round trip. A timeout surfaces as a normal error so the
 /// account's status shows why it stalled instead of sitting silently in sync.
@@ -42,6 +78,20 @@ async fn with_timeout<T>(
             limit.as_secs()
         ))),
     }
+}
+
+/// `YYYY-MM-DD` in the user's own timezone.
+///
+/// Local, not UTC: the heatmap is a row of days as the user experienced them, and
+/// a mail that arrived at 08:00 in Shanghai belongs to that morning, not to the
+/// previous evening.
+pub fn local_day(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
 }
 
 pub fn now_ms() -> i64 {
@@ -77,6 +127,9 @@ pub struct SyncEngine {
     states: Mutex<HashMap<String, SyncStatus>>,
     /// accounts currently mid-sync (overlap guard).
     in_flight: Mutex<HashSet<String>>,
+    /// Accounts that asked to sync while they were already syncing. Drained by
+    /// `sync_account` before it lets go of the slot.
+    resync: Mutex<HashSet<String>>,
     /// account_id → unix millis of last sync attempt (scheduler bookkeeping).
     last_attempt: Mutex<HashMap<String, i64>>,
     /// Held for the duration of one classification cycle. The pending queue is
@@ -96,6 +149,7 @@ impl SyncEngine {
             sink,
             states: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(HashSet::new()),
+            resync: Mutex::new(HashSet::new()),
             last_attempt: Mutex::new(HashMap::new()),
             classifying: tokio::sync::Mutex::new(()),
         })
@@ -167,19 +221,169 @@ impl SyncEngine {
         }
     }
 
+    /// Hold an IMAP connection open per account so mail arrives instead of being
+    /// collected.
+    ///
+    /// The scheduler above still runs, and still has to: IDLE is not universal
+    /// (POP3 has no equivalent, and some IMAP servers do not offer it), a dropped
+    /// connection is normal on a laptop that sleeps or a phone that changes
+    /// network, and a timer is the thing that notices. This makes the common case
+    /// immediate and leaves the timer as the floor.
+    ///
+    /// One task per account, each reconnecting on its own. Spawned as a future for
+    /// the same reason as `run_scheduler`: Tauri's setup hook has no runtime in
+    /// context.
+    pub async fn run_watchers(self: Arc<Self>) {
+        // Accounts already being watched, so a rescan does not start a second
+        // connection for one that is merely mid-reconnect.
+        let mut watching: HashSet<String> = HashSet::new();
+        loop {
+            let accounts = self.store.list_accounts().unwrap_or_default();
+            for acc in accounts {
+                if !watchable(&acc) {
+                    continue;
+                }
+                if !watching.insert(acc.id.clone()) {
+                    continue;
+                }
+                let engine = Arc::clone(&self);
+                tokio::spawn(engine.watch_account(acc.id.clone()));
+            }
+            // Long enough that adding an account is picked up without the loop
+            // being a poll in its own right.
+            tokio::time::sleep(WATCH_RESCAN).await;
+            // Forget accounts that went away, so a re-added one is watched again.
+            let live: HashSet<String> = self
+                .store
+                .list_accounts()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            watching.retain(|id| live.contains(id));
+        }
+    }
+
+    /// One account's live connection, for as long as the account exists.
+    ///
+    /// Failure is expected here — a laptop closes, a network changes, a server
+    /// recycles the connection — so the loop backs off rather than giving up, and
+    /// gives up only on the two things that will not fix themselves: the account
+    /// being gone, and a server that does not do IDLE.
+    async fn watch_account(self: Arc<Self>, account_id: String) {
+        let mut backoff = WATCH_BACKOFF_MIN;
+        loop {
+            let Ok(account) = self.store.get_account(&account_id) else {
+                tracing::debug!("watch: {account_id} 已不存在，停止监听");
+                return;
+            };
+            if account.sync_interval_secs == 0 {
+                return;
+            }
+
+            // The wait bounds itself, but only once it is waiting: a server that
+            // accepts the connection and then goes silent mid-login would hold
+            // this task forever, and this account would never be live again.
+            let waited = with_timeout(
+                IDLE_WINDOW + WATCH_SLACK,
+                "等待新邮件",
+                imap::wait_for_mail(&account, IDLE_WINDOW),
+            )
+            .await
+            .and_then(|r| r);
+
+            match waited {
+                Ok(imap::Watch::Changed) => {
+                    backoff = WATCH_BACKOFF_MIN;
+                    tracing::debug!("watch: {} 有新动静，立即同步", account.email);
+                    if let Err(e) = self.sync_account(&account_id).await {
+                        tracing::warn!("watch: {} 同步失败: {e}", account.email);
+                    }
+                }
+                Ok(imap::Watch::Quiet) => {
+                    // Go straight back to waiting. Re-issuing IDLE is what the
+                    // RFC asks for anyway.
+                    backoff = WATCH_BACKOFF_MIN;
+                }
+                Ok(imap::Watch::Unsupported) => {
+                    tracing::info!("watch: {} 不支持 IDLE，改由定时同步负责", account.email);
+                    return;
+                }
+                Err(e) => {
+                    // Includes a rejected login: retrying with a backoff is
+                    // right, because the user may be about to fix the password.
+                    tracing::debug!(
+                        "watch: {} 连接中断，{} 秒后重试: {e}",
+                        account.email,
+                        backoff.as_secs()
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(WATCH_BACKOFF_MAX);
+                }
+            }
+        }
+    }
+
     /// Fetch + classify one account. Returns number of new messages stored.
+    ///
+    /// A request that arrives while this account is already syncing is not
+    /// dropped — it is remembered and served by another pass as soon as the
+    /// current one finishes. Dropping it is what made "live" mail feel slow:
+    /// classification holds the slot for as long as the model takes, and an
+    /// IDLE wake landing in that window used to be discarded, leaving mail
+    /// that had already arrived to wait for the next scheduled tick — up to
+    /// the account's whole sync interval.
     pub async fn sync_account(&self, account_id: &str) -> Result<u32> {
         {
             let mut in_flight = self.in_flight.lock().unwrap();
             if !in_flight.insert(account_id.to_string()) {
-                return Ok(0); // already syncing
+                self.resync.lock().unwrap().insert(account_id.to_string());
+                return Ok(0);
             }
         }
-        self.last_attempt.lock().unwrap().insert(account_id.to_string(), now_ms());
 
-        let result = self.sync_account_inner(account_id).await;
+        let mut result;
+        let mut total = 0u32;
+        loop {
+            self.last_attempt.lock().unwrap().insert(account_id.to_string(), now_ms());
+            result = self.sync_account_inner(account_id).await;
+            match &result {
+                Ok(n) => total += *n,
+                // A failed pass clears the follow-up too: whatever is wrong
+                // will still be wrong immediately afterwards, and the retry
+                // belongs to the scheduler's backoff, not to this loop.
+                Err(_) => {
+                    // A failed pass clears the follow-up too: whatever is wrong
+                    // will still be wrong immediately afterwards, and the retry
+                    // belongs to the scheduler's backoff, not to this loop.
+                    let mut in_flight = self.in_flight.lock().unwrap();
+                    self.resync.lock().unwrap().remove(account_id);
+                    in_flight.remove(account_id);
+                    break;
+                }
+            }
 
-        self.in_flight.lock().unwrap().remove(account_id);
+            // Deciding to stop and letting go of the slot has to be one step.
+            // Checking `resync` and then releasing separately leaves a gap: a
+            // wake arriving in it finds the slot still taken, leaves a marker,
+            // and returns — and then nobody is left to honour the marker, which
+            // loses exactly the live mail this loop exists to catch.
+            //
+            // `in_flight` is taken before `resync` here and on the requesting
+            // side too, so the two cannot deadlock against each other.
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if self.resync.lock().unwrap().remove(account_id) {
+                drop(in_flight);
+                tracing::debug!("sync: {account_id} 期间又有新动静，继续同步");
+                continue;
+            }
+            in_flight.remove(account_id);
+            break;
+        }
+        // Report the whole run, not just its last pass.
+        if result.is_ok() {
+            result = Ok(total);
+        }
         match &result {
             Ok(n) => {
                 let n = *n;
@@ -245,6 +449,10 @@ impl SyncEngine {
                 Ok(msg) => {
                     if self.store.insert_message(&msg)? {
                         inserted += 1;
+                        // What this mail wanted to load, recorded now so the
+                        // privacy figures cover everything that arrived rather
+                        // than only what somebody opened.
+                        self.scan_trackers(&msg);
                     }
                 }
                 Err(e) => {
@@ -279,6 +487,27 @@ impl SyncEngine {
         Ok(inserted)
     }
 
+    /// Record what one message wanted to load from elsewhere.
+    ///
+    /// Best-effort and non-fatal: the scan is a report about the mail, and a
+    /// mailbox that refused to accept mail because a report failed would be a
+    /// worse trade than a missing report. Text-only mail is marked scanned
+    /// without looking, because there is nothing in it to find.
+    pub fn scan_trackers(&self, msg: &EmailMessage) {
+        let hits = match msg.body_html.as_deref().filter(|h| !h.is_empty()) {
+            Some(html) => crate::trackers::scan(html),
+            None => Vec::new(),
+        };
+        let day = local_day(msg.date);
+        let outcome = self
+            .store
+            .put_trackers(&msg.id, &day, &hits)
+            .and_then(|()| self.store.mark_scanned(&msg.id));
+        if let Err(e) = outcome {
+            tracing::warn!("tracker scan not recorded for {}: {e}", msg.id);
+        }
+    }
+
     /// Run the AI triage over stored-but-unclassified messages.
     /// Returns how many messages were classified.
     pub async fn classify_pending(&self) -> Result<u32> {
@@ -304,6 +533,9 @@ impl SyncEngine {
         }
 
         let channels = self.store.list_channels()?;
+        // Read once per cycle, not per message: the user is not editing labels
+        // in the middle of a classification run, and this is a table scan.
+        let labels = self.store.list_labels()?;
         let mut done = 0u32;
         let mut consecutive_failures = 0u32;
         // One lookup per account per cycle rather than per message.
@@ -318,7 +550,7 @@ impl SyncEngine {
                     v
                 }
             };
-            match ai::classify(&self.http, &settings, &msg).await {
+            match ai::classify(&self.http, &settings, &msg, &labels).await {
                 Ok(analysis) => {
                     consecutive_failures = 0;
                     self.store.set_analysis(&msg.id, &analysis)?;
@@ -396,9 +628,58 @@ impl SyncEngine {
             format!("{} <{}>", msg.from_name, msg.from_addr)
         };
 
+        let payload = NotifyPayload {
+            category: analysis.category,
+            account_email: account_email.clone(),
+            from: from.clone(),
+            subject: msg.subject.clone(),
+            summary: analysis.summary.clone(),
+            verification_code: analysis.verification_code.clone(),
+            date: msg.date,
+        };
+
+        // External channels go first, and `routed` records what actually
+        // arrived rather than what was configured. Suppressing the desktop
+        // notification because a channel was *supposed* to carry this would
+        // mean a mail nobody hears about at all whenever Telegram is down —
+        // the one case where the local notification matters most.
+        //
+        // Concurrently, each with its own bounded attempt: see `NOTIFY_BUDGET`.
+        // One channel that hangs must not stop another from being tried, and
+        // must not hold the popup for longer than its own budget.
+        let wanted: Vec<&NotifyChannel> = channels
+            .iter()
+            .filter(|ch| ch.enabled && ch.notify_categories.contains(&analysis.category))
+            .collect();
+        let mut routed = false;
+        if !wanted.is_empty() {
+            let http = &self.http;
+            let payload = &payload;
+            let attempts = wanted.into_iter().map(|ch| async move {
+                match tokio::time::timeout(NOTIFY_BUDGET, notify::dispatch(http, ch, payload)).await
+                {
+                    Ok(Ok(())) => true,
+                    Ok(Err(e)) => {
+                        tracing::warn!("channel {} dispatch failed: {e}", ch.name);
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "channel {} 未在 {} 秒内完成，本机通知照常发出",
+                            ch.name,
+                            NOTIFY_BUDGET.as_secs()
+                        );
+                        false
+                    }
+                }
+            });
+            routed = futures::future::join_all(attempts).await.into_iter().any(|ok| ok);
+        }
+
         match analysis.category {
             Category::Verification | Category::Important => {
                 self.sink.alert(&AlertEvent {
+                    routed,
                     message_id: msg.id.clone(),
                     category: analysis.category,
                     account_email: account_email.clone(),
@@ -417,69 +698,78 @@ impl SyncEngine {
             Category::Normal => {}
         }
 
-        let payload = NotifyPayload {
-            category: analysis.category,
-            account_email,
-            from,
-            subject: msg.subject.clone(),
-            summary: analysis.summary.clone(),
-            verification_code: analysis.verification_code.clone(),
-            date: msg.date,
-        };
-        for ch in channels {
-            if ch.enabled && ch.notify_categories.contains(&analysis.category) {
-                if let Err(e) = notify::dispatch(&self.http, ch, &payload).await {
-                    tracing::warn!("channel {} dispatch failed: {e}", ch.name);
-                }
-            }
-        }
     }
 
     /// Delete messages locally (soft) and — when `on_server` — remotely too.
-    /// Server-side deletion is best-effort: local state always wins.
-    pub async fn delete_messages(&self, ids: &[String], on_server: bool) {
-        // Resolve UIDs/accounts before the local delete hides the rows.
-        let mut groups: HashMap<(String, String), Vec<String>> = HashMap::new();
+    ///
+    /// A server delete that fails leaves its messages **untouched**: they stay
+    /// visible, and the returned report names them. The UI hides a row the
+    /// moment the user asks, so a silent failure here would look exactly like a
+    /// success and the mail would reappear at the next sync with no explanation.
+    /// Local-only deletion cannot fail this way and always reports success.
+    pub async fn delete_messages(&self, ids: &[String], on_server: bool) -> DeleteReport {
+        // Resolve UIDs/accounts before the local delete hides the rows. A
+        // message that no longer resolves is already gone, which is the outcome
+        // being asked for, so it counts as deleted.
+        let mut groups: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
         let mut touched_accounts: HashSet<String> = HashSet::new();
+        let mut report = DeleteReport::default();
+
         for id in ids {
-            if let Ok(msg) = self.store.get_message(id) {
-                touched_accounts.insert(msg.account_id.clone());
-                groups
-                    .entry((msg.account_id.clone(), msg.folder.clone()))
-                    .or_default()
-                    .push(msg.uid.clone());
+            match self.store.get_message(id) {
+                Ok(msg) => {
+                    touched_accounts.insert(msg.account_id.clone());
+                    groups
+                        .entry((msg.account_id.clone(), msg.folder.clone()))
+                        .or_default()
+                        .push((id.clone(), msg.uid.clone()));
+                }
+                Err(_) => report.deleted.push(id.clone()),
             }
         }
 
-        if on_server {
-            for ((account_id, folder), uids) in &groups {
-                let account = match self.store.get_account(account_id) {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
-                let res = match account.protocol {
+        for ((account_id, folder), targets) in &groups {
+            let (ids_here, uids): (Vec<String>, Vec<String>) = targets.iter().cloned().unzip();
+            if !on_server {
+                report.deleted.extend(ids_here);
+                continue;
+            }
+
+            let outcome = match self.store.get_account(account_id) {
+                Ok(account) => match account.protocol {
                     Protocol::Imap => {
-                        with_timeout(DELETE_TIMEOUT, "删除", imap::delete(&account, folder, uids))
+                        with_timeout(DELETE_TIMEOUT, "删除", imap::delete(&account, folder, &uids))
                             .await
                             .and_then(|r| r)
                     }
                     Protocol::Pop3 => {
-                        with_timeout(DELETE_TIMEOUT, "删除", pop3::delete(&account, uids))
+                        with_timeout(DELETE_TIMEOUT, "删除", pop3::delete(&account, &uids))
                             .await
                             .and_then(|r| r)
                     }
-                };
-                if let Err(e) = res {
-                    tracing::warn!("server delete on {account_id} failed (kept local delete): {e}");
+                },
+                Err(e) => Err(e),
+            };
+
+            match outcome {
+                Ok(()) => report.deleted.extend(ids_here),
+                Err(e) => {
+                    tracing::warn!("server delete on {account_id} failed, keeping the mail: {e}");
+                    report.failed.extend(ids_here);
+                    // The first failure is the one worth showing; a second
+                    // account's timeout says nothing new.
+                    report.error.get_or_insert_with(|| e.to_string());
                 }
             }
         }
-        if let Err(e) = self.store.soft_delete(ids) {
+
+        if let Err(e) = self.store.soft_delete(&report.deleted) {
             tracing::error!("local delete failed: {e}");
         }
         for account_id in touched_accounts {
             self.sink.mail_changed(&account_id);
         }
+        report
     }
 
     /// Re-run classification for a single message (user action).
@@ -491,7 +781,8 @@ impl SyncEngine {
             ));
         }
         let msg = self.store.get_message(message_id)?;
-        let analysis = ai::classify(&self.http, &settings, &msg).await?;
+        let labels = self.store.list_labels().unwrap_or_default();
+        let analysis = ai::classify(&self.http, &settings, &msg, &labels).await?;
         self.store.set_analysis(message_id, &analysis)?;
         let channels = self.store.list_channels()?;
         self.act_on(&msg, &analysis, &settings, &channels, false).await;
@@ -522,6 +813,75 @@ mod tests {
         seeded_store_with(1)
     }
 
+    /// A sync requested while one is already running must not be thrown away.
+    ///
+    /// This is the whole reason "live" mail could be minutes late: an IDLE
+    /// wake landing during a classification cycle used to return `Ok(0)` and
+    /// vanish, leaving mail that had already arrived to wait for the next
+    /// scheduled tick.
+    #[test]
+    fn a_sync_requested_mid_sync_is_remembered_not_dropped() {
+        let engine = SyncEngine::new(seeded_store(), Box::new(NullSink));
+        // Stand in for a pass that is under way.
+        engine.in_flight.lock().unwrap().insert("acc1".to_string());
+
+        let dropped = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(engine.sync_account("acc1"))
+            .unwrap();
+
+        assert_eq!(dropped, 0, "it does not sync on top of the running pass");
+        assert!(
+            engine.resync.lock().unwrap().contains("acc1"),
+            "but it leaves a note so the running pass goes round again"
+        );
+    }
+
+    /// After a pass, "nothing is running" and "nothing is owed" must agree.
+    ///
+    /// This is the post-condition, not the interleaving: the race itself — a
+    /// wake landing between the final `resync` check and the slot release — is
+    /// prevented by construction, because both are done under one acquisition
+    /// of `in_flight` in the same order the requesting side uses. There is no
+    /// seam left to drive from a test without a synchronisation hook in
+    /// production code, so this checks the state the fix is supposed to leave
+    /// and the lock ordering carries the rest.
+    ///
+    /// Deliberately uses an unknown account so `sync_account_inner` fails at
+    /// its first store lookup: the release path is what is under test, and a
+    /// test that reaches for a real mail server is a test that depends on DNS
+    /// and can sit through the fetch timeout.
+    #[test]
+    fn after_a_pass_the_slot_and_the_marker_agree() {
+        let engine = SyncEngine::new(seeded_store(), Box::new(NullSink));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+
+        assert!(rt.block_on(engine.sync_account("nope")).is_err());
+        assert!(engine.in_flight.lock().unwrap().is_empty());
+        assert!(engine.resync.lock().unwrap().is_empty());
+
+        // And the slot really is free, so a later wake syncs rather than
+        // leaving a marker for a pass that is not running.
+        assert!(rt.block_on(engine.sync_account("nope")).is_err());
+        assert!(engine.in_flight.lock().unwrap().is_empty());
+        assert!(engine.resync.lock().unwrap().is_empty());
+    }
+
+    /// The note is per-account: a busy mailbox must not drag an idle one into
+    /// an extra pass.
+    #[test]
+    fn the_follow_up_note_does_not_leak_between_accounts() {
+        let engine = SyncEngine::new(seeded_store_with(2), Box::new(NullSink));
+        engine.in_flight.lock().unwrap().insert("acc1".to_string());
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(engine.sync_account("acc1")).unwrap();
+
+        let resync = engine.resync.lock().unwrap();
+        assert!(resync.contains("acc1"));
+        assert!(!resync.contains("acc2"));
+    }
+
     /// An account plus `count` unclassified messages.
     fn seeded_store_with(count: usize) -> Arc<Store> {
         let store = Store::open_in_memory().unwrap();
@@ -545,6 +905,9 @@ mod tests {
         for i in 0..count {
             store
                 .insert_message(&EmailMessage {
+                    cc_addrs: Vec::new(),
+                    references: Vec::new(),
+                    thread_id: String::new(),
                     id: format!("m{}", i + 1),
                     account_id: "acc1".into(),
                     folder: "INBOX".into(),
@@ -572,6 +935,38 @@ mod tests {
 
     /// An unconfigured AI filter must be a no-op, not an error — the mail sync
     /// has to keep working before the user configures an LLM.
+    /// Only some accounts can be live, and getting that wrong means either a
+    /// pointless reconnect loop against POP3 or a connection the user switched off.
+    #[test]
+    fn only_imap_accounts_with_auto_sync_are_watched() {
+        let acc = AccountConfig {
+            id: "acc1".into(),
+            label: "Test".into(),
+            email: "me@example.com".into(),
+            protocol: Protocol::Imap,
+            host: "imap.example.com".into(),
+            port: 993,
+            username: "me@example.com".into(),
+            password: "secret".into(),
+            tls: TlsMode::Tls,
+            smtp: None,
+            sync_interval_secs: 300,
+            color_hue: 20,
+            created_at: 1,
+        };
+        assert!(watchable(&acc));
+
+        // POP3 cannot be told anything it did not ask for.
+        let mut pop = acc.clone();
+        pop.protocol = Protocol::Pop3;
+        assert!(!watchable(&pop));
+
+        // Automatic mail switched off.
+        let mut manual = acc.clone();
+        manual.sync_interval_secs = 0;
+        assert!(!watchable(&manual));
+    }
+
     #[tokio::test]
     async fn classify_pending_is_noop_without_ai() {
         let store = seeded_store();
@@ -658,11 +1053,49 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
 
-        engine.delete_messages(&["m1".to_string()], false).await;
+        let report = engine.delete_messages(&["m1".to_string()], false).await;
 
+        assert!(report.ok(), "a local delete cannot fail: {report:?}");
+        assert_eq!(report.deleted, vec!["m1".to_string()]);
         assert!(store.get_message("m1").is_err());
         assert_eq!(store.query_messages(&MessageQuery::default()).unwrap().total, 0);
         assert_eq!(sink.changed.lock().unwrap().as_slice(), ["acc1"]);
+    }
+
+    /// A server that refuses the delete still has the mail. Hiding it locally
+    /// anyway would look like success and then undo itself at the next sync, so
+    /// the message stays and the report names it.
+    #[tokio::test]
+    async fn a_refused_server_delete_keeps_the_message() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        // The seeded account points at a host that does not resolve, so the
+        // IMAP round trip fails without a server to talk to.
+        let report = engine.delete_messages(&["m1".to_string()], true).await;
+
+        assert!(!report.ok(), "the delete did not happen");
+        assert_eq!(report.failed, vec!["m1".to_string()]);
+        assert!(report.deleted.is_empty());
+        assert!(report.error.is_some(), "a failure needs a reason to show");
+        // Still there, still readable.
+        assert!(store.get_message("m1").is_ok());
+        assert_eq!(store.query_messages(&MessageQuery::default()).unwrap().total, 1);
+    }
+
+    /// An id that no longer resolves is already in the state the caller asked
+    /// for, so it counts as deleted rather than as a failure to report.
+    #[tokio::test]
+    async fn deleting_a_message_that_is_already_gone_succeeds() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        let report = engine.delete_messages(&["ghost".to_string()], true).await;
+
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(report.deleted, vec!["ghost".to_string()]);
     }
 
     /// A server that accepts the connection and then goes silent must not pin

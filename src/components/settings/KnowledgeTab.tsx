@@ -17,11 +17,13 @@ import type {
   EmbeddingSettingsPublic,
   IndexStatus,
   MemoryEntry,
+  MemoryEvent,
   MemoryKind,
   RerankerKind,
   RerankerSettingsPublic,
   TestResult,
 } from "../../lib/types";
+import { MEMORY_OP_LABEL } from "../../lib/types";
 import { Icon } from "../Icon";
 import { Group, Section, SwitchField, TestOutput } from "./parts";
 
@@ -57,6 +59,20 @@ const MEMORY_KINDS: Array<{ id: MemoryKind; label: string }> = [
   { id: "contact", label: "联系人" },
 ];
 
+/**
+ * A day, never a time. `formatDate` shows the clock for anything from today,
+ * which reads as a timestamp on a line that means "since when" — and a memory's
+ * validity is a date, not a moment.
+ */
+function day(ms: number): string {
+  if (!ms) return "";
+  return new Date(ms).toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  });
+}
+
 export function KnowledgeTab() {
   const { pushToast } = useApp();
 
@@ -66,6 +82,10 @@ export function KnowledgeTab() {
   const [rerankKey, setRerankKey] = useState("");
   const [index, setIndex] = useState<IndexStatus | null>(null);
   const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [history, setHistory] = useState<MemoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  /** Which memory's audit trail is open, and what it says. */
+  const [trail, setTrail] = useState<{ id: string; events: MemoryEvent[] } | null>(null);
   const [newMemory, setNewMemory] = useState("");
   const [newKind, setNewKind] = useState<MemoryKind>("preference");
   const [busy, setBusy] = useState(false);
@@ -73,16 +93,18 @@ export function KnowledgeTab() {
 
   const load = useCallback(async () => {
     try {
-      const [e, r, i, m] = await Promise.all([
+      const [e, r, i, m, h] = await Promise.all([
         api.getEmbeddingSettings(),
         api.getRerankerSettings(),
         api.indexStatus(),
         api.listMemories(),
+        api.listMemoryHistory(),
       ]);
       setEmbed(e);
       setRerank(r);
       setIndex(i);
       setMemories(m);
+      setHistory(h);
     } catch (err) {
       pushToast("error", `读取设置失败: ${err}`);
     }
@@ -166,6 +188,12 @@ export function KnowledgeTab() {
 
   const pct =
     index && index.total > 0 ? Math.round((index.indexed / index.total) * 100) : 0;
+  // The deep index is a second pass over starred mail only, so it has its own
+  // denominator — showing it against the whole mailbox would read as stalled.
+  const deepPct =
+    index && index.deepTotal > 0
+      ? Math.round((index.deepIndexed / index.deepTotal) * 100)
+      : 0;
 
   return (
     <>
@@ -317,6 +345,22 @@ export function KnowledgeTab() {
             {index?.model ? ` · 模型 ${index.model}` : ""}
             {index?.building ? " · 正在建立…" : ""}
           </p>
+          {/* Starred mail gets a second, finer pass: the whole body in chunks
+              instead of one vector per message. Hidden until something is
+              starred, because a 0/0 bar looks broken. */}
+          {index != null && index.deepTotal > 0 && (
+            <>
+              <div className="kb-bar" aria-hidden>
+                <span className="kb-bar-fill deep" style={{ width: `${deepPct}%` }} />
+              </div>
+              <p className="kb-index-text">
+                收藏邮件全文精读 <strong>{index.deepIndexed}</strong> / {index.deepTotal} 封
+                <span className="field-hint kb-deep-hint">
+                  收藏的邮件会按段落整篇建立索引，长邮件里的细节也能被问到。
+                </span>
+              </p>
+            </>
+          )}
           {index?.error && (
             <p className="kb-index-error">
               <Icon name="alert" size={13} /> {index.error}
@@ -458,7 +502,7 @@ export function KnowledgeTab() {
       >
         <div className="kb-mem-add">
           <select
-            className="select kb-mem-kind"
+            className="select"
             value={newKind}
             onChange={(e) => setNewKind(e.target.value as MemoryKind)}
           >
@@ -500,7 +544,30 @@ export function KnowledgeTab() {
                 <span className={`badge badge-${m.kind === "contact" ? "verification" : m.kind === "fact" ? "normal" : "important"}`}>
                   {MEMORY_KINDS.find((k) => k.id === m.kind)?.label}
                 </span>
-                <span className="kb-mem-text">{m.text}</span>
+                <span className="kb-mem-text">
+                  {m.text}
+                  <span className="kb-mem-meta">
+                    {m.origin === "user" ? "手动添加" : "助手记录"}
+                    {" · "}
+                    {day(m.validFrom ?? m.createdAt)} 起
+                    {m.useCount > 0 && ` · 用过 ${m.useCount} 次`}
+                  </span>
+                </span>
+                <button
+                  className="icon-btn"
+                  aria-label="查看这条记忆的变更记录"
+                  title="变更记录"
+                  onClick={async () => {
+                    if (trail?.id === m.id) return setTrail(null);
+                    try {
+                      setTrail({ id: m.id, events: await api.memoryEvents(m.id) });
+                    } catch (e) {
+                      pushToast("error", `读取变更记录失败: ${e}`);
+                    }
+                  }}
+                >
+                  <Icon name="clock" size={14} />
+                </button>
                 <button
                   className="icon-btn"
                   aria-label="删除这条记忆"
@@ -508,6 +575,7 @@ export function KnowledgeTab() {
                     try {
                       await api.deleteMemory(m.id);
                       setMemories(await api.listMemories());
+                      if (trail?.id === m.id) setTrail(null);
                     } catch (e) {
                       pushToast("error", `删除失败: ${e}`);
                     }
@@ -515,9 +583,81 @@ export function KnowledgeTab() {
                 >
                   <Icon name="trash" size={14} />
                 </button>
+
+                {/* The trail is what makes an automatic edit auditable: what it
+                    said before, what it says now, and why the model changed it. */}
+                {trail?.id === m.id && (
+                  <ol className="kb-trail">
+                    {trail.events.length === 0 && (
+                      <li className="kb-trail-empty">没有变更记录。</li>
+                    )}
+                    {trail.events.map((ev) => (
+                      <li key={ev.id} className="kb-trail-row">
+                        <span className="kb-trail-op">
+                          {MEMORY_OP_LABEL[ev.op] ?? ev.op}
+                        </span>
+                        <span className="kb-trail-when">{day(ev.createdAt)}</span>
+                        <span className="kb-trail-text">
+                          {ev.beforeText && ev.beforeText !== ev.afterText && (
+                            <s className="kb-trail-before">{ev.beforeText}</s>
+                          )}
+                          {ev.afterText}
+                          {ev.reason && (
+                            <span className="kb-trail-reason">{ev.reason}</span>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
               </li>
             ))}
           </ul>
+        )}
+
+        {/* Superseded memories are kept for 90 days. Folded away by default —
+            this is the answer to "why did it stop saying that", not something
+            anyone needs open. */}
+        {history.length > 0 && (
+          <div className="kb-history">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setShowHistory(!showHistory)}
+            >
+              <Icon name={showHistory ? "chevron-down" : "chevron-right"} size={14} />
+              历史记忆（{history.length}）
+            </button>
+            {showHistory && (
+              <ul className="kb-mem-list kb-mem-old">
+                {history.map((m) => (
+                  <li key={m.id} className="kb-mem">
+                    <span className="set-muted-tag">已替换</span>
+                    <span className="kb-mem-text">
+                      <s>{m.text}</s>
+                      <span className="kb-mem-meta">
+                        {day(m.validFrom ?? m.createdAt)} – {day(m.validTo ?? m.updatedAt)}
+                      </span>
+                    </span>
+                    <button
+                      className="icon-btn"
+                      aria-label="彻底删除这条历史"
+                      onClick={async () => {
+                        try {
+                          await api.deleteMemory(m.id);
+                          setHistory(await api.listMemoryHistory());
+                        } catch (e) {
+                          pushToast("error", `删除失败: ${e}`);
+                        }
+                      }}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
       </Section>
     </>

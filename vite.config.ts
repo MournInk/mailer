@@ -34,5 +34,17 @@ export default defineConfig({
   build: {
     target: "es2022",
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        // KaTeX is bigger than the rest of the app put together. It is loaded
+        // from local disk in a packaged build, so splitting it buys no latency —
+        // it keeps one 600 kB blob from being rebuilt and re-read on every edit
+        // to a component, and keeps the size warning meaningful.
+        manualChunks: {
+          katex: ["katex"],
+          markdown: ["marked", "dompurify"],
+        },
+      },
+    },
   },
 });
