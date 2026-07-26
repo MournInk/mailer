@@ -187,7 +187,20 @@ impl SyncEngine {
             self.store.known_uids(account_id, "INBOX")?.into_iter().collect();
 
         let raws: Vec<RawMail> = match account.protocol {
-            Protocol::Imap => imap::fetch_new(&account, &known, MAX_FETCH).await?,
+            Protocol::Imap => {
+                let expected = self.store.uid_validity(account_id, "INBOX")?;
+                let fetched = imap::fetch_new(&account, &known, MAX_FETCH, expected).await?;
+                if fetched.uids_reset {
+                    // The mailbox was rebuilt server-side: retire the stale UIDs
+                    // so future syncs re-diff cleanly. Messages survive, and
+                    // Message-ID dedup keeps re-fetched mail from duplicating.
+                    let n = self.store.clear_uids(account_id, "INBOX")?;
+                    tracing::warn!("UIDVALIDITY reset on {account_id}: retired {n} stale UIDs");
+                }
+                self.store
+                    .set_uid_validity(account_id, "INBOX", fetched.uid_validity)?;
+                fetched.mails
+            }
             Protocol::Pop3 => pop3::fetch_new(&account, &known, MAX_FETCH).await?,
         };
 

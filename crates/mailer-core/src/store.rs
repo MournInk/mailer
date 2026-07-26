@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Per-folder IMAP UIDVALIDITY. When a server rebuilds a mailbox it bumps this
+-- and reissues UIDs from 1, which would make our stored UIDs alias unrelated
+-- new mail. Tracking it lets sync discard the stale UID set instead of
+-- silently skipping messages forever (RFC 3501 §2.3.1.1).
+CREATE TABLE IF NOT EXISTS folder_state (
+    account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    folder       TEXT NOT NULL,
+    uid_validity INTEGER NOT NULL,
+    PRIMARY KEY (account_id, folder)
+);
 "#;
 
 impl Store {
@@ -252,6 +263,46 @@ impl Store {
                 c.prepare("SELECT uid FROM messages WHERE account_id=?1 AND folder=?2")?;
             let rows = stmt.query_map(params![account_id, folder], |r| r.get::<_, String>(0))?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Last known IMAP UIDVALIDITY for a folder, if we have ever synced it.
+    pub fn uid_validity(&self, account_id: &str, folder: &str) -> Result<Option<u32>> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT uid_validity FROM folder_state WHERE account_id=?1 AND folder=?2",
+                params![account_id, folder],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|v| v as u32))
+        })
+    }
+
+    pub fn set_uid_validity(&self, account_id: &str, folder: &str, value: u32) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO folder_state (account_id, folder, uid_validity) VALUES (?1,?2,?3)
+                 ON CONFLICT(account_id, folder) DO UPDATE SET uid_validity=excluded.uid_validity",
+                params![account_id, folder, value as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Forget every stored UID for a folder after a UIDVALIDITY change. The
+    /// messages stay — only their now-meaningless server UIDs are cleared, so
+    /// the next sync re-diffs from scratch and `message_id` dedup prevents
+    /// duplicates.
+    pub fn clear_uids(&self, account_id: &str, folder: &str) -> Result<usize> {
+        self.with(|c| {
+            // A UID must stay unique per (account, folder); prefix the row id so
+            // the cleared values cannot collide with real server UIDs.
+            Ok(c.execute(
+                "UPDATE messages SET uid = 'stale:' || id
+                 WHERE account_id=?1 AND folder=?2 AND uid NOT LIKE 'stale:%'",
+                params![account_id, folder],
+            )?)
         })
     }
 
@@ -720,6 +771,35 @@ mod tests {
         assert_eq!(list[0].notify_categories.len(), 2);
         s.delete_channel("ch1").unwrap();
         assert!(s.list_channels().unwrap().is_empty());
+    }
+
+    #[test]
+    fn uid_validity_reset_retires_stale_uids() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        s.insert_message(&sample_message("m1", "7")).unwrap();
+        assert_eq!(s.uid_validity("acc1", "INBOX").unwrap(), None);
+
+        s.set_uid_validity("acc1", "INBOX", 42).unwrap();
+        assert_eq!(s.uid_validity("acc1", "INBOX").unwrap(), Some(42));
+        assert_eq!(s.known_uids("acc1", "INBOX").unwrap(), vec!["7".to_string()]);
+
+        // After a server-side rebuild the old UID must stop matching, so a new
+        // message that happens to reuse UID 7 is not mistaken for the old one.
+        assert_eq!(s.clear_uids("acc1", "INBOX").unwrap(), 1);
+        assert!(!s.known_uids("acc1", "INBOX").unwrap().contains(&"7".to_string()));
+        // The message itself survives the reset.
+        assert_eq!(s.query_messages(&MessageQuery::default()).unwrap().total, 1);
+
+        // A different message may now claim UID 7 without a uniqueness clash.
+        let mut fresh = sample_message("m2", "7");
+        fresh.message_id = Some("<m2@example.com>".into());
+        assert!(s.insert_message(&fresh).unwrap());
+
+        // Clearing twice must not re-mangle already-retired rows.
+        assert_eq!(s.clear_uids("acc1", "INBOX").unwrap(), 1);
+        s.set_uid_validity("acc1", "INBOX", 43).unwrap();
+        assert_eq!(s.uid_validity("acc1", "INBOX").unwrap(), Some(43));
     }
 
     #[test]

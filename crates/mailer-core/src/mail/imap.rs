@@ -249,19 +249,55 @@ pub async fn check(account: &AccountConfig) -> Result<()> {
     logout(&mut session).await
 }
 
+/// What one `fetch_new` round trip learned about the mailbox.
+pub struct Fetched {
+    /// The mailbox's current UIDVALIDITY. The caller persists it and passes it
+    /// back as `expected_validity` next time.
+    pub uid_validity: u32,
+    /// True when the server's UIDVALIDITY no longer matches `expected_validity`,
+    /// meaning every stored UID for this folder is stale and must be discarded.
+    pub uids_reset: bool,
+    pub mails: Vec<RawMail>,
+}
+
 /// Fetch messages from INBOX whose UIDs are not in `known`.
+///
+/// `expected_validity` is the UIDVALIDITY observed on the previous sync, if
+/// any. When the server reports a different one it has reissued UIDs from
+/// scratch, so `known` is meaningless and gets ignored for this run.
 pub async fn fetch_new(
     account: &AccountConfig,
     known: &HashSet<String>,
     max_fetch: u32,
-) -> Result<Vec<RawMail>> {
+    expected_validity: Option<u32>,
+) -> Result<Fetched> {
     let mut session = login(account).await?;
     let mailbox = select(&mut session, INBOX).await?;
+
+    let uid_validity = mailbox.uid_validity.unwrap_or(0);
+    let uids_reset = matches!(expected_validity, Some(prev) if prev != uid_validity);
+    if uids_reset {
+        tracing::warn!(
+            "imap: UIDVALIDITY changed on {} ({:?} -> {}); stored UIDs are stale",
+            account.email,
+            expected_validity,
+            uid_validity
+        );
+    }
+    // After a reset every stored UID may alias a different message, so trusting
+    // `known` would silently skip real mail.
+    let empty;
+    let known = if uids_reset {
+        empty = HashSet::new();
+        &empty
+    } else {
+        known
+    };
 
     // Empty mailbox: nothing to diff, and some servers dislike SEARCH on it.
     if mailbox.exists == 0 || max_fetch == 0 {
         logout(&mut session).await?;
-        return Ok(Vec::new());
+        return Ok(Fetched { uid_validity, uids_reset, mails: Vec::new() });
     }
 
     // One round trip for the full UID list, then diff locally.
@@ -273,7 +309,7 @@ pub async fn fetch_new(
     let wanted = select_new_uids(&all, known, max_fetch);
     if wanted.is_empty() {
         logout(&mut session).await?;
-        return Ok(Vec::new());
+        return Ok(Fetched { uid_validity, uids_reset, mails: Vec::new() });
     }
 
     // BODY.PEEK[] is RFC822 without the \Seen side effect: read state is ours
@@ -303,14 +339,18 @@ pub async fn fetch_new(
 
     // Newest-last, regardless of the order the server chose to answer in.
     fetched.sort_by_key(|(uid, _)| *uid);
-    Ok(fetched
-        .into_iter()
-        .map(|(uid, bytes)| RawMail {
-            uid: uid.to_string(),
-            folder: INBOX.to_string(),
-            bytes,
-        })
-        .collect())
+    Ok(Fetched {
+        uid_validity,
+        uids_reset,
+        mails: fetched
+            .into_iter()
+            .map(|(uid, bytes)| RawMail {
+                uid: uid.to_string(),
+                folder: INBOX.to_string(),
+                bytes,
+            })
+            .collect(),
+    })
 }
 
 /// Permanently delete the given UIDs from `folder` on the server.
