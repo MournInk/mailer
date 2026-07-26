@@ -110,6 +110,8 @@ function AlertModal({ alert, queued }: { alert: AlertEvent; queued: number }) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        // the modal is the topmost layer: no other overlay should react too
+        e.stopPropagation();
         close();
         return;
       }

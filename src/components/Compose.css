@@ -1,0 +1,152 @@
+/* Compose modal — a single sheet floating over the app, blurred paper behind. */
+
+.cp-backdrop {
+  position: fixed;
+  inset: 0;
+  /* above the mobile reading-pane overlay (40), below alerts / toasts */
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.cp-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: min(86vh, 760px);
+  min-width: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  /* the shell disables selection app-wide; a draft needs it back */
+  user-select: text;
+}
+
+/* -- head ------------------------------------------------------------------ */
+
+.cp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 13px 12px 13px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cp-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+/* -- fields ---------------------------------------------------------------- */
+
+.cp-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px 18px;
+}
+
+.cp-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.cp-warn {
+  color: var(--warn);
+}
+
+.cp-textarea {
+  min-height: 180px;
+  /* grown to fit by the component; this caps it before the modal overflows */
+  max-height: 46vh;
+  overflow-y: auto;
+  resize: none;
+}
+
+.cp-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.cp-error > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* -- foot ------------------------------------------------------------------ */
+
+.cp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+.cp-shortcut {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes cp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.cp-spin {
+  animation: cp-spin 900ms linear infinite;
+}
+
+/* -- narrow windows -------------------------------------------------------- */
+
+@media (max-width: 600px) {
+  .cp-backdrop {
+    padding: 0;
+    align-items: stretch;
+  }
+  .cp-modal {
+    width: 100%;
+    max-height: 100%;
+    border: none;
+    border-radius: 0;
+  }
+  .cp-foot {
+    border-radius: 0;
+  }
+  .cp-shortcut {
+    display: none;
+  }
+  .cp-textarea {
+    max-height: none;
+  }
+}
