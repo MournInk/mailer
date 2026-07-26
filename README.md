@@ -54,6 +54,29 @@ npm run tauri ios init
 npm run tauri ios dev
 ```
 
+## 自动构建
+
+`.github/workflows/build.yml` 在打 `v*` 标签或手动触发时构建各端产物：
+
+| 平台 | 产物 | 备注 |
+| --- | --- | --- |
+| macOS | universal `.dmg` | 同时包含 arm64 与 x86_64 |
+| Windows | `.msi` / `.exe` | x64 |
+| Linux | `.deb` / `.rpm` / `.AppImage` | 在 ubuntu-22.04 上构建，压低 glibc 依赖门槛 |
+| Android | `.apk` | debug 签名，可直接安装 |
+| iOS | 无 | 仅编译验证，见下 |
+
+打标签触发时，产物会额外挂到一个**草稿** release 上，由维护者决定何时发布。
+
+### 签名说明
+
+两处需要你自己补齐凭据才能产出可分发的包：
+
+- **iOS**：生成 `.ipa` 必须有 Apple 签名身份（开发者账号 + 证书 + provisioning profile）。工作流不携带这些，因此 iOS job 只做「关闭签名、编译模拟器目标」的验证——它能证明 Rust 与前端在 iOS 上编译链接通过，但不是安装包。要出真包，需把证书与描述文件放进仓库 secrets 并改用 `xcodebuild archive` + `-exportArchive`。
+- **Android**：未签名的 release APK 无法安装，而仓库中没有 keystore，所以产物是 debug 构建。上架前需添加 keystore secrets，在 `gen/android` 中配置签名，并把构建命令的 `--debug` 换成 `--release`。
+
+`.github/workflows/ci.yml` 则在每次 push / PR 上跑核心测试（三大桌面平台）、前端构建与 Tauri 桌面端编译检查。
+
 ## AI 过滤器配置
 
 设置 → AI 过滤器：
