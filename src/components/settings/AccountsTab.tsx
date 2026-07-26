@@ -68,7 +68,7 @@ export function AccountsTab() {
         <p className="set-toolbar-text">
           {accounts.length > 0
             ? `已添加 ${accounts.length} 个邮箱，邮件与密码只保存在本机。`
-            : "邮箱密码只加密保存在本机，可随时删除。"}
+            : "邮箱密码保存在本机数据库，不会上传；当前尚未加密存储。"}
         </p>
         <button
           className="btn btn-primary"

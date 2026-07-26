@@ -81,7 +81,7 @@ export function Onboarding() {
         </div>
 
         <p className="onboard-note">
-          邮箱密码与 API Key 仅加密保存在本机，不会上传到任何服务器。
+          邮箱密码与 API Key 保存在本机数据库，不会上传到任何服务器；当前尚未加密存储。
         </p>
       </div>
     </div>

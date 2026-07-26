@@ -381,22 +381,50 @@ pub async fn delete(account: &AccountConfig, folder: &str, uids: &[String]) -> R
         {}
     }
 
-    {
+    // A bare EXPUNGE removes EVERY \Deleted message in the mailbox (RFC 3501
+    // §6.4.3), not just ours. Another client that marks-without-expunging —
+    // mutt, alpine, Thunderbird's "just mark it as deleted" mode — leaves a
+    // backlog of flagged mail that a bare EXPUNGE would destroy along with the
+    // one message we were asked to remove, with no local copy and no warning.
+    // UID EXPUNGE (RFC 4315) touches only the set we name.
+    if has_uidplus(&mut session).await {
         let mut stream = Box::pin(
             session
-                .expunge()
+                .uid_expunge(&set)
                 .await
-                .map_err(|e| Error::Imap(format!("清除邮件失败 (邮箱 {folder}): {e}")))?,
+                .map_err(|e| Error::Imap(format!("清除邮件失败 (UID {set}): {e}")))?,
         );
         while stream
             .try_next()
             .await
-            .map_err(|e| Error::Imap(format!("清除邮件失败 (邮箱 {folder}): {e}")))?
+            .map_err(|e| Error::Imap(format!("清除邮件失败 (UID {set}): {e}")))?
             .is_some()
         {}
+    } else {
+        // Without UIDPLUS the safe options are "destroy other clients' pending
+        // deletions" or "leave ours flagged". The message is already hidden
+        // locally and stays recoverable on the server, so we stop here rather
+        // than delete mail the user never pointed at.
+        tracing::warn!(
+            "imap: server lacks UIDPLUS; UIDs {set} are flagged \\Deleted but not expunged \
+             (a bare EXPUNGE would also destroy mail flagged by other clients)"
+        );
     }
 
     logout(&mut session).await
+}
+
+/// Whether the server advertises UIDPLUS, which is what makes a targeted
+/// expunge possible. A failed probe answers false: skipping the expunge leaves
+/// mail on the server, while guessing yes and being wrong deletes it.
+async fn has_uidplus(session: &mut Session<Transport>) -> bool {
+    match session.capabilities().await {
+        Ok(caps) => caps.has_str("UIDPLUS"),
+        Err(e) => {
+            tracing::warn!("imap: CAPABILITY probe failed ({e}); assuming no UIDPLUS");
+            false
+        }
+    }
 }
 
 #[cfg(test)]

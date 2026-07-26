@@ -31,6 +31,15 @@ const MAX_UIDL_TOKEN: usize = 255;
 // Pure protocol helpers (unit-tested below)
 // ---------------------------------------------------------------------------
 
+/// Outcome of reading one multi-line message body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BodyRead {
+    Complete(Vec<u8>),
+    /// Wire size of a message that blew past the cap. The payload is gone, but
+    /// the response was drained so the session is still usable.
+    TooLarge(usize),
+}
+
 /// A parsed single-line POP3 status response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Status {
@@ -143,6 +152,42 @@ fn resolve_delete_targets(listing: &[(u32, String)], uids: &[String]) -> Vec<u32
     numbers
 }
 
+/// A minimal RFC 5322 message standing in for one we refused to download.
+/// It goes through the normal parse path, so it lands in the list like any
+/// other mail and the user can see that something was skipped and why.
+fn oversize_placeholder(size: usize) -> Vec<u8> {
+    let mb = size as f64 / (1024.0 * 1024.0);
+    format!(
+        "Subject: =?UTF-8?B?{}?=\r\n\
+         From: Mailer <noreply@mailer.local>\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         这封邮件约 {mb:.1} MB，超过了 {} MB 的单封下载上限，因此没有下载正文。\r\n\
+         请在网页版或其他邮件客户端中查看。\r\n",
+        base64_utf8("邮件过大，未下载"),
+        MAX_MESSAGE_BYTES / (1024 * 1024),
+    )
+    .into_bytes()
+}
+
+/// Encoded-word body for the placeholder subject. Hand-rolled because pulling
+/// in a base64 crate for one fixed string is not worth the dependency.
+fn base64_utf8(s: &str) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let b = s.as_bytes();
+    let mut out = String::new();
+    for chunk in b.chunks(3) {
+        let n = ((chunk[0] as u32) << 16)
+            | ((*chunk.get(1).unwrap_or(&0) as u32) << 8)
+            | (*chunk.get(2).unwrap_or(&0) as u32);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 /// Reject credentials carrying CRLF: they would let a crafted value smuggle
 /// extra commands into the session.
 fn check_credential(value: &str, what: &str) -> Result<()> {
@@ -247,8 +292,10 @@ impl Session {
     }
 
     /// Read a multi-line message body (RETR) up to the lone `.`, de-stuffed.
-    async fn read_body(&mut self, max_bytes: usize) -> Result<Vec<u8>> {
+    async fn read_body(&mut self, max_bytes: usize) -> Result<BodyRead> {
         let mut body = Vec::new();
+        let mut total = 0usize;
+        let mut oversize = false;
         loop {
             // The per-line ceiling is the whole-message ceiling, so neither a
             // single endless line nor endless lines can outgrow `max_bytes`.
@@ -256,15 +303,24 @@ impl Session {
             if is_terminator(&wire) {
                 break;
             }
+            total += wire.len() + 2;
+            if oversize {
+                continue; // still draining; the bytes are discarded
+            }
             append_body_line(&mut body, &wire);
             if body.len() > max_bytes {
-                return Err(Error::Pop3(format!(
-                    "邮件超过 {} MB 上限",
-                    max_bytes / (1024 * 1024)
-                )));
+                // Bailing out here would leave the rest of this message in the
+                // socket, desyncing every later command. Keep reading to the
+                // terminator so the session stays usable, and discard as we go.
+                oversize = true;
+                body = Vec::new();
             }
         }
-        Ok(body)
+        Ok(if oversize {
+            BodyRead::TooLarge(total)
+        } else {
+            BodyRead::Complete(body)
+        })
     }
 
     /// USER/PASS login. A refusal here is a credential problem, not a protocol one.
@@ -305,7 +361,7 @@ impl Session {
 
     /// `RETR n`. `None` means the server refused this one (e.g. another client
     /// deleted it) — the session stays in sync and usable.
-    async fn retr(&mut self, number: u32) -> Result<Option<Vec<u8>>> {
+    async fn retr(&mut self, number: u32) -> Result<Option<BodyRead>> {
         self.send(&format!("RETR {number}")).await?;
         if let Status::Err(text) = self.read_status().await? {
             tracing::warn!("pop3: RETR {number} refused: {}", err_text(&text));
@@ -401,12 +457,25 @@ pub async fn fetch_new(
 
     let mut mails = Vec::with_capacity(targets.len());
     for (number, token) in targets {
-        if let Some(bytes) = session.retr(number).await? {
-            mails.push(RawMail {
+        match session.retr(number).await? {
+            Some(BodyRead::Complete(bytes)) => mails.push(RawMail {
                 uid: token,
                 folder: "INBOX".to_string(),
                 bytes,
-            });
+            }),
+            Some(BodyRead::TooLarge(size)) => {
+                // Skipping it silently would be worse than useless: the UIDL
+                // would never be stored, so every future sync would download
+                // the same oversized message again and get no further. A
+                // placeholder claims the UIDL and tells the user what happened.
+                tracing::warn!("pop3: message {number} is {size} bytes, past the cap; stored as a placeholder");
+                mails.push(RawMail {
+                    uid: token,
+                    folder: "INBOX".to_string(),
+                    bytes: oversize_placeholder(size),
+                });
+            }
+            None => {}
         }
     }
 
@@ -494,6 +563,34 @@ mod tests {
         assert!(!is_terminator(b".."));
         assert!(!is_terminator(b""));
         assert!(!is_terminator(b". "));
+    }
+
+    /// A message past the cap must not abort the sync: it becomes a visible
+    /// placeholder that claims the UIDL, so it is never re-downloaded.
+    #[test]
+    fn oversize_placeholder_is_a_parseable_message() {
+        let raw = oversize_placeholder(30 * 1024 * 1024);
+        let text = String::from_utf8(raw.clone()).unwrap();
+        assert!(text.starts_with("Subject: =?UTF-8?B?"), "{text}");
+        assert!(text.contains("\r\n\r\n"), "headers must end with a blank line");
+        assert!(text.contains("30.0 MB"), "the real size belongs in the body: {text}");
+
+        let parsed = crate::mail::parse::parse_mail(
+            "ph".into(),
+            "acc1",
+            &RawMail { uid: "u1".into(), folder: "INBOX".into(), bytes: raw },
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(parsed.subject, "邮件过大，未下载");
+        assert_eq!(parsed.uid, "u1");
+    }
+
+    #[test]
+    fn base64_pads_every_chunk_length() {
+        assert_eq!(base64_utf8("a"), "YQ==");
+        assert_eq!(base64_utf8("ab"), "YWI=");
+        assert_eq!(base64_utf8("abc"), "YWJj");
     }
 
     #[test]

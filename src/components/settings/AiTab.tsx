@@ -186,7 +186,7 @@ export function AiTab() {
             onChange={(e) => patch({ apiBase: e.target.value })}
           />
           <p className="field-hint">
-            请求会从本机直接发往该地址，不经过任何中转服务器；API Key 也只加密保存在本机。
+            请求会从本机直接发往该地址，不经过任何中转服务器；API Key 保存在本机数据库，当前尚未加密存储。
           </p>
         </div>
 
