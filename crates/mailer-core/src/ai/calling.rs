@@ -83,8 +83,14 @@ pub fn build_body(
     max_tokens: u32,
 ) -> Value {
     match provider {
-        AiProvider::OpenaiCompatible | AiProvider::OpenaiResponses => {
+        AiProvider::OpenaiCompatible => {
             openai_body(model, system, turns, tools, temperature, max_tokens)
+        }
+        // Same vendor, different API: `/responses` takes `input`, not
+        // `messages`, and names the reply budget `max_output_tokens`. Sending it
+        // the chat-completions body is a 400 on the first word.
+        AiProvider::OpenaiResponses => {
+            responses_body(model, system, turns, tools, temperature, max_tokens)
         }
         AiProvider::Anthropic => anthropic_body(model, system, turns, tools, temperature, max_tokens),
         AiProvider::Gemini => gemini_body(system, turns, tools, temperature, max_tokens),
@@ -154,6 +160,85 @@ fn openai_body(
                             "description": t.description,
                             "parameters": t.parameters,
                         }
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+/// OpenAI's Responses API.
+///
+/// Structurally unlike chat completions in three ways that all have to be right
+/// at once: the transcript is `input` rather than `messages`, a tool call and
+/// its result are top-level items paired by `call_id` rather than a field on an
+/// assistant message and a `tool` role, and the function declaration is flat
+/// rather than nested under `function`.
+fn responses_body(
+    model: &str,
+    system: &str,
+    turns: &[Turn],
+    tools: &[ToolDef],
+    temperature: f32,
+    max_tokens: u32,
+) -> Value {
+    // The system text rides as the first input item, the same shape the
+    // non-tool path in `ai::openai_responses` uses.
+    let mut input = vec![json!({
+        "role": "system",
+        "content": [{ "type": "input_text", "text": system }],
+    })];
+    for t in turns {
+        match t {
+            Turn::User(text) => input.push(json!({
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }],
+            })),
+            Turn::Assistant { text, calls } => {
+                // An assistant turn that only called a tool has no text to echo,
+                // and an empty output_text block is rejected.
+                if !text.is_empty() {
+                    input.push(json!({
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": text }],
+                    }));
+                }
+                for c in calls {
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": c.id,
+                        "name": c.name,
+                        // Arguments travel as a JSON *string*, as in chat completions.
+                        "arguments": c.arguments.to_string(),
+                    }));
+                }
+            }
+            Turn::ToolResult { id, content, .. } => input.push(json!({
+                "type": "function_call_output",
+                "call_id": id,
+                "output": content,
+            })),
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "temperature": temperature,
+        "max_output_tokens": max_tokens,
+        "input": input,
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
                     })
                 })
                 .collect(),
@@ -294,7 +379,8 @@ pub fn parse_completion(provider: AiProvider, raw: &str) -> Result<Completion> {
     let v: Value = serde_json::from_str(raw)
         .map_err(|e| Error::Ai(format!("AI 响应不是合法 JSON ({e})")))?;
     let mut c = match provider {
-        AiProvider::OpenaiCompatible | AiProvider::OpenaiResponses => parse_openai(&v),
+        AiProvider::OpenaiCompatible => parse_openai(&v),
+        AiProvider::OpenaiResponses => parse_responses(&v),
         AiProvider::Anthropic => parse_anthropic(&v),
         AiProvider::Gemini => parse_gemini(&v),
     };
@@ -342,6 +428,61 @@ fn parse_openai(v: &Value) -> Completion {
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty()),
         text: msg["content"].as_str().unwrap_or_default().to_string(),
+        calls,
+    }
+}
+
+/// The Responses API answers with a flat `output` list: reasoning summaries,
+/// the assistant message, and any function calls, in whatever order the model
+/// produced them. There is no `choices` array to read.
+fn parse_responses(v: &Value) -> Completion {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut calls = Vec::new();
+
+    for item in v["output"].as_array().into_iter().flatten() {
+        match item["type"].as_str() {
+            Some("message") => {
+                for part in item["content"].as_array().into_iter().flatten() {
+                    // Refusals and other part types are not an answer.
+                    if part["type"].as_str() == Some("output_text") {
+                        text.push_str(part["text"].as_str().unwrap_or_default());
+                    }
+                }
+            }
+            Some("function_call") => calls.push(ToolInvocation {
+                // `call_id` is what a `function_call_output` must echo back;
+                // `id` identifies the item itself and will not pair.
+                id: item["call_id"]
+                    .as_str()
+                    .or_else(|| item["id"].as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                name: item["name"].as_str().unwrap_or_default().to_string(),
+                arguments: item["arguments"]
+                    .as_str()
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or_else(|| json!({})),
+            }),
+            Some("reasoning") => {
+                for part in item["summary"].as_array().into_iter().flatten() {
+                    reasoning.push_str(part["text"].as_str().unwrap_or_default());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Some gateways answer with only the SDK convenience field.
+    if text.is_empty() {
+        if let Some(flat) = v["output_text"].as_str() {
+            text.push_str(flat);
+        }
+    }
+
+    Completion {
+        text,
+        reasoning: (!reasoning.trim().is_empty()).then_some(reasoning),
         calls,
     }
 }
@@ -434,6 +575,105 @@ mod tests {
         assert!(b["messages"][2]["tool_calls"][0]["function"]["arguments"].is_string());
         assert_eq!(b["messages"][3]["role"], "tool");
         assert_eq!(b["messages"][3]["tool_call_id"], "call_1");
+    }
+
+    /// `/responses` is a different API, not a dialect of chat completions.
+    /// Sending it `messages` + `max_tokens` is a 400 before the model is
+    /// reached, which is what made the assistant unusable on this provider.
+    #[test]
+    fn responses_uses_input_items_and_pairs_calls_by_call_id() {
+        let turns = vec![
+            Turn::User("找账单".into()),
+            Turn::Assistant {
+                text: String::new(),
+                calls: vec![ToolInvocation {
+                    id: "call_1".into(),
+                    name: "search_mail".into(),
+                    arguments: json!({"query": "账单"}),
+                }],
+            },
+            Turn::ToolResult {
+                id: "call_1".into(),
+                name: "search_mail".into(),
+                content: "[]".into(),
+            },
+        ];
+        let b = responses_body("gpt-4o-mini", "sys", &turns, &[tool()], 0.2, 900);
+
+        assert_eq!(b["max_output_tokens"], 900);
+        assert!(b.get("messages").is_none(), "wrong transcript field");
+        assert!(b.get("max_tokens").is_none(), "wrong token field");
+
+        let input = b["input"].as_array().unwrap();
+        assert_eq!(input[0]["role"], "system");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[1]["role"], "user");
+        // A text-less assistant turn contributes only the call item.
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert!(input[2]["arguments"].is_string(), "arguments must be a JSON string");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_1", "the pairing key must match");
+        assert_eq!(input.len(), 4);
+
+        // Function declarations are flat here, not nested under "function".
+        assert_eq!(b["tools"][0]["type"], "function");
+        assert_eq!(b["tools"][0]["name"], "search_mail");
+        assert_eq!(b["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn responses_keeps_assistant_text_when_there_is_any() {
+        let turns = vec![Turn::Assistant { text: "好的".into(), calls: Vec::new() }];
+        let b = responses_body("m", "sys", &turns, &[], 0.2, 100);
+        assert_eq!(b["input"][1]["role"], "assistant");
+        assert_eq!(b["input"][1]["content"][0]["type"], "output_text");
+        assert_eq!(b["input"][1]["content"][0]["text"], "好的");
+        assert!(b.get("tools").is_none(), "no tools, no field");
+    }
+
+    /// The reply is a flat `output` list, not `choices`. Reading it as chat
+    /// completions found nothing and reported "AI 未返回任何内容".
+    #[test]
+    fn responses_output_items_are_parsed() {
+        let raw = r#"{"id":"resp_1","output":[
+            {"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"先搜索"}]},
+            {"id":"msg_1","type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"查到了"},
+                {"type":"refusal","refusal":"ignored"}
+            ]},
+            {"id":"fc_1","type":"function_call","call_id":"call_9","name":"search_mail",
+             "arguments":"{\"query\":\"账单\"}"}
+        ]}"#;
+        let c = parse_completion(AiProvider::OpenaiResponses, raw).unwrap();
+        assert_eq!(c.text, "查到了");
+        assert_eq!(c.reasoning.unwrap(), "先搜索");
+        assert_eq!(c.calls.len(), 1);
+        // The id has to be the one a function_call_output echoes back.
+        assert_eq!(c.calls[0].id, "call_9");
+        assert_eq!(c.calls[0].name, "search_mail");
+        assert_eq!(c.calls[0].arguments["query"], "账单");
+    }
+
+    #[test]
+    fn responses_accepts_the_flat_convenience_field() {
+        let c = parse_completion(AiProvider::OpenaiResponses, r#"{"output":[],"output_text":"pong"}"#)
+            .unwrap();
+        assert_eq!(c.text, "pong");
+        assert!(!c.wants_tools());
+    }
+
+    #[test]
+    fn responses_broken_arguments_degrade_to_an_empty_object() {
+        let raw = r#"{"output":[{"type":"function_call","call_id":"c1","name":"search_mail",
+                     "arguments":"{oops"}]}"#;
+        let c = parse_completion(AiProvider::OpenaiResponses, raw).unwrap();
+        assert_eq!(c.calls[0].arguments, json!({}));
+    }
+
+    #[test]
+    fn responses_an_empty_reply_is_an_error() {
+        assert!(parse_completion(AiProvider::OpenaiResponses, r#"{"output":[]}"#).is_err());
     }
 
     #[test]

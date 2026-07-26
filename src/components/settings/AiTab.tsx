@@ -258,7 +258,7 @@ export function AiTab() {
             <p className="field-hint">
               {stored.hasApiKey
                 ? "已配置密钥，留空则保持不变。"
-                : "尚未配置密钥。本地模型（如 Ollama）可随意填写一个占位值。"}
+                : "尚未配置密钥。本地模型（如 Ollama、vLLM）本就不需要密钥，留空即可。"}
             </p>
           </div>
           <div className="field">

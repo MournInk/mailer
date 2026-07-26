@@ -181,11 +181,14 @@ export function ContextMenu({
 }
 
 /**
- * Owns the menu state and installs the app-wide `contextmenu` handler.
- * A caller can contribute richer items by setting `data-ctx-*` on an element,
- * but the default is always at least the clipboard actions.
+ * Owns the menu state, and — unless told otherwise — installs the window-wide
+ * `contextmenu` handler that supplies the clipboard fallback.
+ *
+ * Pass `clipboardFallback: false` for a menu that only opens where its owner
+ * says so. Two instances both installing the fallback would answer the same
+ * right-click twice and stack two identical menus on top of each other.
  */
-export function useContextMenu() {
+export function useContextMenu({ clipboardFallback = true } = {}) {
   const [state, setState] = useState<MenuState | null>(null);
   const close = useCallback(() => setState(null), []);
 
@@ -196,9 +199,11 @@ export function useContextMenu() {
   }, []);
 
   useEffect(() => {
+    if (!clipboardFallback) return;
     const onCtx = (e: MouseEvent) => {
-      // Rows and other rich targets handle their own menu and stop propagation;
-      // anything that reaches here gets the clipboard menu.
+      // Rows and other rich targets handle their own menu, and React's handler
+      // has already run by the time this window listener sees the event, so a
+      // prevented default means somebody richer took it.
       if (e.defaultPrevented) return;
       const items = clipboardItems(e.target);
       if (items.length === 0) {
@@ -209,7 +214,20 @@ export function useContextMenu() {
     };
     window.addEventListener("contextmenu", onCtx);
     return () => window.removeEventListener("contextmenu", onCtx);
-  }, [openAt]);
+  }, [openAt, clipboardFallback]);
 
   return { state, close, openAt };
+}
+
+/**
+ * The app-wide clipboard menu.
+ *
+ * It belongs at the shell rather than inside any one pane: a packaged Tauri
+ * webview has no native context menu, so wherever this is not mounted there is
+ * no copy or paste at all — which is what the settings and onboarding screens
+ * used to be, since the only instance lived in the mail list.
+ */
+export function GlobalContextMenu() {
+  const { state, close } = useContextMenu();
+  return <ContextMenu state={state} onClose={close} />;
 }

@@ -365,10 +365,11 @@ pub fn set_ai_settings(state: State<'_, AppState>, input: AiSettingsInput) -> Cm
 
 #[tauri::command]
 pub async fn test_ai(state: State<'_, AppState>) -> CmdResult<TestResult> {
+    // No key check: a local endpoint (Ollama, vLLM, LM Studio) takes none, and
+    // refusing to probe one left those users with no way to test their setup.
+    // `ai::test` validates the base URL and model, and a remote endpoint that
+    // does need a key answers 401 with a message worth reading.
     let settings = state.engine.store().ai_settings().map_err(err_str)?;
-    if settings.api_key.is_empty() {
-        return Ok(TestResult { ok: false, message: "尚未配置 API Key".into() });
-    }
     Ok(ai::test(state.engine.http(), &settings).await)
 }
 
@@ -761,12 +762,13 @@ pub fn list_memories(state: State<'_, AppState>) -> CmdResult<Vec<MemoryEntry>> 
 #[tauri::command]
 pub fn save_memory(state: State<'_, AppState>, input: MemoryInput) -> CmdResult<MemoryEntry> {
     let store = state.engine.store();
-    let stored = store.list_memories().map_err(err_str)?;
-    let existing = input
-        .id
-        .as_deref()
-        .and_then(|id| stored.iter().find(|m| m.id == id));
-    let entry = memory_from(input, existing, now_ms())?;
+    // One indexed lookup: reading the whole table to find a single row got
+    // slower with every memory the assistant ever stored.
+    let existing = match input.id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => store.get_memory(id).map_err(err_str)?,
+        None => None,
+    };
+    let entry = memory_from(input, existing.as_ref(), now_ms())?;
     store.upsert_memory(&entry).map_err(err_str)?;
     Ok(entry)
 }

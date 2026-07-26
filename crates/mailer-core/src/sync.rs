@@ -79,6 +79,9 @@ pub struct SyncEngine {
     in_flight: Mutex<HashSet<String>>,
     /// account_id → unix millis of last sync attempt (scheduler bookkeeping).
     last_attempt: Mutex<HashMap<String, i64>>,
+    /// Held for the duration of one classification cycle. The pending queue is
+    /// shared by every account, so the cycle has to be too.
+    classifying: tokio::sync::Mutex<()>,
 }
 
 impl SyncEngine {
@@ -94,6 +97,7 @@ impl SyncEngine {
             states: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(HashSet::new()),
             last_attempt: Mutex::new(HashMap::new()),
+            classifying: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -279,9 +283,21 @@ impl SyncEngine {
     /// Returns how many messages were classified.
     pub async fn classify_pending(&self) -> Result<u32> {
         let settings = self.store.ai_settings()?;
-        if !settings.enabled || settings.api_key.is_empty() {
+        if !settings.is_configured() {
             return Ok(0);
         }
+
+        // `unclassified` is global, not per account, so two accounts syncing at
+        // once would both pick up the same rows: the same message classified
+        // twice, billed twice, and — worse — announced twice, pushed to every
+        // channel twice, and auto-deleted by whichever cycle got there second.
+        // Whoever holds this runs the cycle; the other returns and the rows are
+        // still pending on the next tick.
+        let Ok(_cycle) = self.classifying.try_lock() else {
+            tracing::debug!("classification already in flight; leaving the backlog for next tick");
+            return Ok(0);
+        };
+
         let pending = self.store.unclassified(MAX_CLASSIFY)?;
         if pending.is_empty() {
             return Ok(0);
@@ -469,8 +485,10 @@ impl SyncEngine {
     /// Re-run classification for a single message (user action).
     pub async fn reclassify(&self, message_id: &str) -> Result<AiAnalysis> {
         let settings = self.store.ai_settings()?;
-        if !settings.enabled || settings.api_key.is_empty() {
-            return Err(Error::InvalidConfig("AI 过滤器未启用或未配置 API Key".into()));
+        if !settings.is_configured() {
+            return Err(Error::InvalidConfig(
+                "AI 过滤器未启用，或尚未填写接口地址与模型名称".into(),
+            ));
         }
         let msg = self.store.get_message(message_id)?;
         let analysis = ai::classify(&self.http, &settings, &msg).await?;
@@ -501,6 +519,11 @@ mod tests {
     }
 
     fn seeded_store() -> Arc<Store> {
+        seeded_store_with(1)
+    }
+
+    /// An account plus `count` unclassified messages.
+    fn seeded_store_with(count: usize) -> Arc<Store> {
         let store = Store::open_in_memory().unwrap();
         store
             .insert_account(&AccountConfig {
@@ -519,34 +542,36 @@ mod tests {
                 created_at: 1,
             })
             .unwrap();
-        store
-            .insert_message(&EmailMessage {
-                id: "m1".into(),
-                account_id: "acc1".into(),
-                folder: "INBOX".into(),
-                uid: "1".into(),
-                message_id: Some("<m1@example.com>".into()),
-                subject: "Hello".into(),
-                from_name: "Alice".into(),
-                from_addr: "alice@example.com".into(),
-                to_addrs: vec!["me@example.com".into()],
-                date: 1000,
-                snippet: "Hi".into(),
-                body_text: Some("Hi".into()),
-                body_html: None,
-                attachments: vec![],
-                unread: true,
-                starred: false,
-                category: None,
-                analysis: None,
-                received_at: 1000,
-            })
-            .unwrap();
+        for i in 0..count {
+            store
+                .insert_message(&EmailMessage {
+                    id: format!("m{}", i + 1),
+                    account_id: "acc1".into(),
+                    folder: "INBOX".into(),
+                    uid: format!("{}", i + 1),
+                    message_id: Some(format!("<m{}@example.com>", i + 1)),
+                    subject: "Hello".into(),
+                    from_name: "Alice".into(),
+                    from_addr: "alice@example.com".into(),
+                    to_addrs: vec!["me@example.com".into()],
+                    date: 1000 + i as i64,
+                    snippet: "Hi".into(),
+                    body_text: Some("Hi".into()),
+                    body_html: None,
+                    attachments: vec![],
+                    unread: true,
+                    starred: false,
+                    category: None,
+                    analysis: None,
+                    received_at: 1000,
+                })
+                .unwrap();
+        }
         Arc::new(store)
     }
 
-    /// A disabled/unconfigured AI filter must be a no-op, not an error — the
-    /// mail sync has to keep working before the user configures an LLM.
+    /// An unconfigured AI filter must be a no-op, not an error — the mail sync
+    /// has to keep working before the user configures an LLM.
     #[tokio::test]
     async fn classify_pending_is_noop_without_ai() {
         let store = seeded_store();
@@ -555,14 +580,74 @@ mod tests {
 
         assert_eq!(engine.classify_pending().await.unwrap(), 0);
 
-        // Enabling without a key must still be a no-op rather than a failed call.
-        let mut ai = AiSettings::default();
-        ai.enabled = true;
+        // Enabled but with nothing to call: still a no-op, not a failed request.
+        let ai = AiSettings {
+            enabled: true,
+            api_base: String::new(),
+            model: String::new(),
+            ..AiSettings::default()
+        };
         store.set_ai_settings(&ai).unwrap();
         assert_eq!(engine.classify_pending().await.unwrap(), 0);
 
         // The message stays pending for a later, configured run.
         assert_eq!(store.unclassified(10).unwrap().len(), 1);
+    }
+
+    /// A local model has no API key, and treating that as "unconfigured" made
+    /// the whole AI filter a silent no-op for anyone running Ollama. The cycle
+    /// must now actually attempt the endpoint the user configured.
+    ///
+    /// The base URL here is rejected by `ai::validate` before any socket is
+    /// opened, so what the test observes is the attempt itself: a skipped cycle
+    /// answers `Ok(0)`, and only a cycle that really called out can accumulate
+    /// the three consecutive failures that abort the round.
+    #[tokio::test]
+    async fn a_keyless_endpoint_is_still_attempted() {
+        let store = seeded_store_with(3);
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        store
+            .set_ai_settings(&AiSettings {
+                enabled: true,
+                api_key: String::new(),
+                api_base: "127.0.0.1:11434/v1".into(), // no scheme: refused locally
+                model: "qwen2.5:7b".into(),
+                ..AiSettings::default()
+            })
+            .unwrap();
+
+        let err = engine.classify_pending().await.unwrap_err();
+        assert!(matches!(err, Error::Ai(_)), "got {err:?}");
+        // Nothing was classified on a failed round, so nothing is lost.
+        assert_eq!(store.unclassified(10).unwrap().len(), 3);
+    }
+
+    /// Two accounts syncing at once must not both run the cycle: `unclassified`
+    /// is global, so the second would re-classify the first's messages — billed
+    /// twice, announced twice, and auto-deleted by whichever finished second.
+    #[tokio::test]
+    async fn only_one_classification_cycle_runs_at_a_time() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        store
+            .set_ai_settings(&AiSettings {
+                enabled: true,
+                api_base: "127.0.0.1:11434/v1".into(),
+                model: "qwen2.5:7b".into(),
+                ..AiSettings::default()
+            })
+            .unwrap();
+
+        // Held by hand: the second caller has to find the door shut and leave
+        // the backlog alone rather than duplicate the work.
+        let held = engine.classifying.lock().await;
+        assert_eq!(engine.classify_pending().await.unwrap(), 0);
+        assert_eq!(store.unclassified(10).unwrap().len(), 1);
+        drop(held);
     }
 
     /// Local-only delete must hide the message and tell the UI which account

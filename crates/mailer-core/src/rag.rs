@@ -424,13 +424,25 @@ pub async fn search(
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored.truncate(candidates);
 
-    let mut cands: Vec<Candidate> = Vec::with_capacity(scored.len());
-    for (id, similarity) in scored {
-        // A message deleted between the vector scan and here is simply gone.
-        let Ok(msg) = store.get_message(&id) else { continue };
-        let text = truncate_chars(&body_text(&msg), DOC_CHARS);
-        cands.push(Candidate { msg, text, similarity });
-    }
+    // One batch rather than a query per candidate: `candidates` runs to 200.
+    // A message deleted between the vector scan and here is simply absent, so
+    // the similarity it was scored with has to be looked up by id, not by
+    // position.
+    let ids: Vec<String> = scored.iter().map(|(id, _)| id.clone()).collect();
+    let similarity: std::collections::HashMap<&str, f32> =
+        scored.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+    let mut cands: Vec<Candidate> = store
+        .get_messages(&ids)?
+        .into_iter()
+        .map(|msg| {
+            let similarity = similarity.get(msg.id.as_str()).copied().unwrap_or(0.0);
+            let text = truncate_chars(&body_text(&msg), DOC_CHARS);
+            Candidate { msg, text, similarity }
+        })
+        .collect();
+    // `get_messages` answers in the order asked, which is already best-first;
+    // the sort only matters if that ever stops being true.
+    cands.sort_by(|a, b| b.similarity.total_cmp(&a.similarity));
     if cands.is_empty() {
         return keyword_search(store, query, want);
     }

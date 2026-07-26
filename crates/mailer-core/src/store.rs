@@ -180,6 +180,20 @@ impl Store {
         f(&conn)
     }
 
+    /// Run `f` inside one transaction, committing only if it succeeds.
+    ///
+    /// Every bare `execute` is its own implicit transaction, which in WAL mode
+    /// means a commit — and a disk write — per statement. For the loops below
+    /// (marking a multi-selection read, deleting a batch) that turned one user
+    /// action into one commit per message.
+    fn with_tx<T>(&self, f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
     // -- accounts -----------------------------------------------------------
 
     pub fn insert_account(&self, a: &AccountConfig) -> Result<()> {
@@ -321,6 +335,29 @@ impl Store {
         })
     }
 
+    /// Several messages by id, in the order the ids were given.
+    ///
+    /// Ids that no longer resolve — deleted between a vector scan and here — are
+    /// simply absent from the result, exactly as a per-id lookup would find.
+    /// One prepared statement for the batch: the retriever asks for up to two
+    /// hundred candidates at a time, and as individual queries that was two
+    /// hundred prepares and two hundred trips through the connection mutex.
+    pub fn get_messages(&self, ids: &[String]) -> Result<Vec<EmailMessage>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|c| {
+            let mut stmt = c.prepare("SELECT * FROM messages WHERE id=?1 AND deleted=0")?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(msg) = stmt.query_row(params![id], row_to_message).optional()? {
+                    out.push(msg);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Known UIDs for one folder — used by sync to fetch only new mail.
     pub fn known_uids(&self, account_id: &str, folder: &str) -> Result<Vec<String>> {
         self.with(|c| {
@@ -407,7 +444,10 @@ impl Store {
                 where_sql.push_str(" AND starred=1");
             }
             if let Some(s) = q.search.as_deref().filter(|s| !s.trim().is_empty()) {
-                let pat = format!("%{}%", s.trim().replace('%', "\\%").replace('_', "\\_"));
+                // The backslash goes first: escaping it after the wildcards
+                // would also escape the escapes we just added, and a search for
+                // a literal "\" would silently match nothing.
+                let pat = format!("%{}%", escape_like(s.trim()));
                 for _ in 0..3 {
                     args.push(Box::new(pat.clone()));
                 }
@@ -423,15 +463,15 @@ impl Store {
             let params_ref: Vec<&dyn rusqlite::types::ToSql> =
                 args.iter().map(|b| b.as_ref()).collect();
 
-            let total: u32 = c.query_row(
-                &format!("SELECT COUNT(*) FROM messages WHERE {where_sql}"),
+            // Both totals from one scan. As two queries the same rows were
+            // visited twice per page — and with a `search` filter that is two
+            // full table scans for one keystroke.
+            let (total, unread): (u32, u32) = c.query_row(
+                &format!(
+                    "SELECT COUNT(*), COALESCE(SUM(unread),0) FROM messages WHERE {where_sql}"
+                ),
                 params_ref.as_slice(),
-                |r| r.get(0),
-            )?;
-            let unread: u32 = c.query_row(
-                &format!("SELECT COUNT(*) FROM messages WHERE {where_sql} AND unread=1"),
-                params_ref.as_slice(),
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
 
             let limit = if q.limit == 0 { 50 } else { q.limit.min(200) };
@@ -449,7 +489,10 @@ impl Store {
     }
 
     pub fn set_read(&self, ids: &[String], read: bool) -> Result<()> {
-        self.with(|c| {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_tx(|c| {
             let mut stmt = c.prepare("UPDATE messages SET unread=?2 WHERE id=?1")?;
             for id in ids {
                 stmt.execute(params![id, (!read) as i64])?;
@@ -467,7 +510,10 @@ impl Store {
 
     /// Soft delete locally. Server-side deletion is handled by the sync layer.
     pub fn soft_delete(&self, ids: &[String]) -> Result<()> {
-        self.with(|c| {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_tx(|c| {
             let mut stmt = c.prepare("UPDATE messages SET deleted=1 WHERE id=?1")?;
             for id in ids {
                 stmt.execute(params![id])?;
@@ -719,6 +765,19 @@ impl Store {
         })
     }
 
+    /// One memory by id, or `None` when it is gone.
+    pub fn get_memory(&self, id: &str) -> Result<Option<MemoryEntry>> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT id, kind, text, source, created_at, updated_at
+                 FROM memories WHERE id=?1",
+                params![id],
+                row_to_memory,
+            )
+            .optional()?)
+        })
+    }
+
     pub fn delete_memory(&self, id: &str) -> Result<()> {
         self.with(|c| {
             let n = c.execute("DELETE FROM memories WHERE id=?1", params![id])?;
@@ -737,7 +796,7 @@ impl Store {
             return self.list_memories();
         }
         self.with(|c| {
-            let pat = format!("%{}%", needle.replace('%', "\\%").replace('_', "\\_"));
+            let pat = format!("%{}%", escape_like(needle));
             let mut stmt = c.prepare(
                 "SELECT id, kind, text, source, created_at, updated_at FROM memories
                  WHERE text LIKE ?1 ESCAPE '\\'
@@ -760,6 +819,19 @@ impl Store {
                 params![c0.id, c0.title, c0.created_at, c0.updated_at],
             )?;
             Ok(())
+        })
+    }
+
+    /// Whether a conversation row exists.
+    ///
+    /// `chat_turns` has a foreign key onto `conversations`, so every message has
+    /// to answer this first. Answering it by listing conversations and scanning
+    /// them meant reading the whole table to look at one primary key.
+    pub fn conversation_exists(&self, id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.query_row("SELECT 1 FROM conversations WHERE id=?1", params![id], |_| Ok(()))
+                .optional()?
+                .is_some())
         })
     }
 
@@ -891,6 +963,18 @@ impl Store {
     pub fn set_reranker_settings(&self, s: &RerankerSettings) -> Result<()> {
         self.set_setting("reranker", &serde_json::to_string(s)?)
     }
+}
+
+/// Escape the three characters `LIKE ... ESCAPE '\'` treats specially.
+///
+/// The backslash has to go first. Escaping it last would double the escapes
+/// added for `%` and `_`, and a user searching for a literal backslash — a
+/// Windows path in a mail, say — would match nothing at all.
+fn escape_like(needle: &str) -> String {
+    needle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Little-endian f32 array as written by `put_vector`.
@@ -1157,6 +1241,133 @@ mod tests {
         let m = s.get_message("m1").unwrap();
         assert_eq!(m.category, Some(Category::Verification));
         assert_eq!(m.analysis.unwrap().verification_code.unwrap(), "482913");
+    }
+
+    /// The batch lookup answers in the order asked and quietly omits rows that
+    /// are gone — a vector index outlives the message it points at.
+    #[test]
+    fn get_messages_keeps_the_requested_order_and_skips_the_missing() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        for i in 0..3 {
+            let mut m = sample_message(&format!("m{i}"), &format!("{i}"));
+            m.message_id = Some(format!("<m{i}@x>"));
+            s.insert_message(&m).unwrap();
+        }
+        s.soft_delete(&["m1".into()]).unwrap();
+
+        let ids = vec!["m2".to_string(), "gone".to_string(), "m1".to_string(), "m0".to_string()];
+        let got: Vec<String> = s.get_messages(&ids).unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(got, vec!["m2".to_string(), "m0".to_string()]);
+        assert!(s.get_messages(&[]).unwrap().is_empty());
+    }
+
+    /// A wildcard or an escape character typed into the search box is a literal,
+    /// not a pattern: "50%" must not match every subject in the mailbox.
+    #[test]
+    fn search_treats_like_metacharacters_as_literals() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        for (id, subject) in [("m1", "省 50% 的运费"), ("m2", "普通邮件"), ("m3", r"路径 C:\temp")] {
+            let mut m = sample_message(id, id);
+            m.message_id = Some(format!("<{id}@x>"));
+            m.subject = subject.into();
+            s.insert_message(&m).unwrap();
+        }
+        let find = |needle: &str| {
+            s.query_messages(&MessageQuery {
+                search: Some(needle.to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+
+        assert_eq!(find("50%").total, 1);
+        assert_eq!(find("%").total, 1, "a bare %% must not match everything");
+        assert_eq!(find("_").total, 0);
+        // A backslash is the escape character; unescaped it swallowed the "t".
+        assert_eq!(find(r"C:\temp").total, 1);
+        assert_eq!(find("\\").total, 1);
+    }
+
+    /// Both counters come from one scan now; they still have to agree with the
+    /// filtered set rather than the whole table.
+    #[test]
+    fn counts_follow_the_filter() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        for i in 0..4 {
+            let mut m = sample_message(&format!("m{i}"), &format!("{i}"));
+            m.message_id = Some(format!("<m{i}@x>"));
+            m.subject = if i < 2 { "账单".into() } else { "其他".into() };
+            s.insert_message(&m).unwrap();
+        }
+        s.set_read(&["m0".into()], true).unwrap();
+
+        let page = s.query_messages(&MessageQuery {
+            search: Some("账单".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!((page.total, page.unread), (2, 1));
+
+        let all = s.query_messages(&MessageQuery::default()).unwrap();
+        assert_eq!((all.total, all.unread), (4, 3));
+    }
+
+    #[test]
+    fn a_conversation_is_looked_up_by_key() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(!s.conversation_exists("c1").unwrap());
+        s.upsert_conversation(&Conversation {
+            id: "c1".into(),
+            title: "标题".into(),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+        assert!(s.conversation_exists("c1").unwrap());
+        assert!(!s.conversation_exists("c2").unwrap());
+    }
+
+    #[test]
+    fn a_memory_is_looked_up_by_key() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.get_memory("mem1").unwrap().is_none());
+        s.upsert_memory(&MemoryEntry {
+            id: "mem1".into(),
+            kind: MemoryKind::Contact,
+            text: "老王是 wang@example.com".into(),
+            source: None,
+            created_at: 7,
+            updated_at: 7,
+        })
+        .unwrap();
+        let got = s.get_memory("mem1").unwrap().expect("stored");
+        assert_eq!(got.kind, MemoryKind::Contact);
+        assert_eq!(got.created_at, 7);
+    }
+
+    /// A batch is one transaction. The visible contract is all-or-nothing plus
+    /// "an empty batch is a no-op", which is what an empty selection produces.
+    #[test]
+    fn batched_flag_updates_apply_together() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        for i in 0..3 {
+            let mut m = sample_message(&format!("m{i}"), &format!("{i}"));
+            m.message_id = Some(format!("<m{i}@x>"));
+            s.insert_message(&m).unwrap();
+        }
+        s.set_read(&["m0".into(), "m1".into(), "m2".into()], true).unwrap();
+        assert_eq!(s.query_messages(&MessageQuery::default()).unwrap().unread, 0);
+
+        s.set_read(&[], false).unwrap();
+        s.soft_delete(&[]).unwrap();
+        assert_eq!(s.query_messages(&MessageQuery::default()).unwrap().total, 3);
+
+        s.soft_delete(&["m0".into(), "m1".into()]).unwrap();
+        assert_eq!(s.query_messages(&MessageQuery::default()).unwrap().total, 1);
     }
 
     #[test]

@@ -16,6 +16,16 @@ use crate::types::{AttachmentMeta, EmailMessage};
 /// the middle of a CJK code point.
 const SNIPPET_CHARS: usize = 140;
 
+/// How much of an HTML body the snippet is allowed to look at.
+///
+/// A marketing mail is routinely megabytes of nested tables, and flattening all
+/// of it to keep 140 characters costs two allocations the size of the message —
+/// on every message of every sync. The readable text of a newsletter is almost
+/// entirely markup, so the budget is deliberately generous: 64 KB of source has
+/// never failed to contain the first 140 characters a human would read, and
+/// when it somehow does the snippet falls back to being empty rather than wrong.
+const HTML_SCAN_BYTES: usize = 64 * 1024;
+
 /// Shown for attachments whose headers carry no filename at all.
 const UNNAMED_ATTACHMENT: &str = "未命名附件";
 
@@ -71,9 +81,10 @@ pub fn parse_mail(id: String, account_id: &str, raw: &RawMail, now_ms: i64) -> R
         .map(|text| preview(text, SNIPPET_CHARS))
         .unwrap_or_default();
     if snippet.is_empty() {
-        // No text part, or one that was only whitespace: strip the HTML.
+        // No text part, or one that was only whitespace: strip the HTML. Only
+        // the head of it — see `HTML_SCAN_BYTES`.
         if let Some(html) = body_html.as_deref() {
-            snippet = preview(&html_to_text(html), SNIPPET_CHARS);
+            snippet = preview(&html_to_text(head(html, HTML_SCAN_BYTES)), SNIPPET_CHARS);
         }
     }
 
@@ -174,6 +185,20 @@ fn preview(text: &str, max_chars: usize) -> String {
         }
     }
     out.chars().take(max_chars).collect::<String>().trim_end().to_string()
+}
+
+/// At most `max_bytes` of `s`, cut on a character boundary so the result is
+/// still a `str` the tag stripper can walk.
+fn head(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk back to the start of the character that straddles the limit.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Crude HTML → text for previews: drop markup, decode the entities that
@@ -504,6 +529,29 @@ mod tests {
     fn decode_entities_leaves_unknown_ampersands() {
         assert_eq!(decode_entities("a &amp; b &unknown; c"), "a & b &unknown; c");
         assert_eq!(decode_entities("&lt;&gt;&quot;&#39;&nbsp;"), "<>\"' ");
+    }
+
+    /// A huge HTML body must not be flattened in full to produce 140
+    /// characters, and the cut must never land inside a character.
+    #[test]
+    fn only_the_head_of_a_huge_html_body_is_flattened() {
+        assert_eq!(head("abc", 10), "abc");
+        assert_eq!(head("abcdef", 3), "abc");
+        // The 3-byte character straddling the limit is dropped whole.
+        assert_eq!(head("验证码", 4), "验");
+        assert_eq!(head("验证码", 3), "验");
+        assert!(head("验证码", 2).is_empty());
+
+        let body = format!(
+            "<p>开头就是正文</p>{}",
+            "<td>填充</td>".repeat(HTML_SCAN_BYTES / 4)
+        );
+        let mail = format!("Content-Type: text/html; charset=utf-8\r\n\r\n{body}\r\n");
+        let msg = parse(&mail, 1);
+        assert!(msg.snippet.starts_with("开头就是正文"), "{}", msg.snippet);
+        assert_eq!(msg.snippet.chars().count(), SNIPPET_CHARS);
+        // The body itself is kept whole — only the preview scan is bounded.
+        assert!(msg.body_html.unwrap().len() > HTML_SCAN_BYTES);
     }
 
     #[test]

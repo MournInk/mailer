@@ -14,6 +14,7 @@ import { Compose } from "./components/Compose";
 import { TitleBar } from "./components/TitleBar";
 import { Assistant } from "./components/Assistant";
 import { CommandPalette } from "./components/CommandPalette";
+import { GlobalContextMenu } from "./components/ContextMenu";
 import { ShortcutListener, ShortcutSheet } from "./components/Shortcuts";
 import "./App.css";
 
@@ -40,6 +41,8 @@ export default function App() {
       <CommandPalette />
       <ShortcutSheet />
       <ShortcutListener />
+      {/* Right-click copy/paste, for every view rather than just the mail list. */}
+      <GlobalContextMenu />
     </div>
   );
 }

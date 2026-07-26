@@ -265,6 +265,20 @@ pub struct AiSettings {
     pub extra_instructions: String,
 }
 
+impl AiSettings {
+    /// Whether triage can actually call anything.
+    ///
+    /// The key is deliberately not part of this. A local endpoint — Ollama,
+    /// vLLM, LM Studio, an in-house gateway — takes no credential at all, and
+    /// requiring one meant every such user enabled the AI filter, saw no
+    /// classification ever happen, and had nothing in the UI to explain why.
+    /// A remote endpoint that needs a key answers 401, which surfaces as a
+    /// visible per-account sync error instead of silence.
+    pub fn is_configured(&self) -> bool {
+        self.enabled && !self.api_base.trim().is_empty() && !self.model.trim().is_empty()
+    }
+}
+
 impl Default for AiSettings {
     fn default() -> Self {
         AiSettings {
@@ -731,4 +745,39 @@ pub struct PendingAction {
     /// Rendered for the user to read before approving.
     pub description: String,
     pub payload: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A local model takes no API key. Treating a missing key as "not
+    /// configured" is what made the AI filter a silent no-op against Ollama.
+    #[test]
+    fn a_local_endpoint_without_a_key_counts_as_configured() {
+        let mut s = AiSettings {
+            enabled: true,
+            api_base: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:7b".into(),
+            api_key: String::new(),
+            ..AiSettings::default()
+        };
+        assert!(s.is_configured());
+
+        s.enabled = false;
+        assert!(!s.is_configured(), "the switch still decides");
+
+        s.enabled = true;
+        s.model = "  ".into();
+        assert!(!s.is_configured(), "no model to call");
+
+        s.model = "qwen2.5:7b".into();
+        s.api_base = String::new();
+        assert!(!s.is_configured(), "no endpoint to call");
+    }
+
+    #[test]
+    fn the_default_settings_are_not_configured() {
+        assert!(!AiSettings::default().is_configured());
+    }
 }
