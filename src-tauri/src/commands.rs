@@ -259,6 +259,16 @@ pub fn set_starred(state: State<'_, AppState>, id: String, starred: bool) -> Cmd
     state.engine.store().set_starred(&id, starred).map_err(err_str)
 }
 
+/// Star or unstar a whole selection.
+#[tauri::command]
+pub fn set_starred_many(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    starred: bool,
+) -> CmdResult<()> {
+    state.engine.store().set_starred_many(&ids, starred).map_err(err_str)
+}
+
 /// Delete messages, reporting what actually went.
 ///
 /// The list hides the rows before this is called, so the report is how it learns

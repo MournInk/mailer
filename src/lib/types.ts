@@ -358,6 +358,8 @@ export interface SyncStatus {
 }
 
 export interface AlertEvent {
+  /** an external channel is already carrying this one */
+  routed: boolean;
   messageId: string;
   category: Category;
   accountEmail: string;

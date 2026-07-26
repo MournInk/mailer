@@ -113,6 +113,9 @@ pub struct SyncEngine {
     states: Mutex<HashMap<String, SyncStatus>>,
     /// accounts currently mid-sync (overlap guard).
     in_flight: Mutex<HashSet<String>>,
+    /// Accounts that asked to sync while they were already syncing. Drained by
+    /// `sync_account` before it lets go of the slot.
+    resync: Mutex<HashSet<String>>,
     /// account_id → unix millis of last sync attempt (scheduler bookkeeping).
     last_attempt: Mutex<HashMap<String, i64>>,
     /// Held for the duration of one classification cycle. The pending queue is
@@ -132,6 +135,7 @@ impl SyncEngine {
             sink,
             states: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(HashSet::new()),
+            resync: Mutex::new(HashSet::new()),
             last_attempt: Mutex::new(HashMap::new()),
             classifying: tokio::sync::Mutex::new(()),
         })
@@ -307,16 +311,47 @@ impl SyncEngine {
     }
 
     /// Fetch + classify one account. Returns number of new messages stored.
+    ///
+    /// A request that arrives while this account is already syncing is not
+    /// dropped — it is remembered and served by another pass as soon as the
+    /// current one finishes. Dropping it is what made "live" mail feel slow:
+    /// classification holds the slot for as long as the model takes, and an
+    /// IDLE wake landing in that window used to be discarded, leaving mail
+    /// that had already arrived to wait for the next scheduled tick — up to
+    /// the account's whole sync interval.
     pub async fn sync_account(&self, account_id: &str) -> Result<u32> {
         {
             let mut in_flight = self.in_flight.lock().unwrap();
             if !in_flight.insert(account_id.to_string()) {
-                return Ok(0); // already syncing
+                self.resync.lock().unwrap().insert(account_id.to_string());
+                return Ok(0);
             }
         }
-        self.last_attempt.lock().unwrap().insert(account_id.to_string(), now_ms());
 
-        let result = self.sync_account_inner(account_id).await;
+        let mut result;
+        let mut total = 0u32;
+        loop {
+            self.last_attempt.lock().unwrap().insert(account_id.to_string(), now_ms());
+            result = self.sync_account_inner(account_id).await;
+            match &result {
+                Ok(n) => total += *n,
+                // A failed pass clears the follow-up too: whatever is wrong
+                // will still be wrong immediately afterwards, and the retry
+                // belongs to the scheduler's backoff, not to this loop.
+                Err(_) => {
+                    self.resync.lock().unwrap().remove(account_id);
+                    break;
+                }
+            }
+            if !self.resync.lock().unwrap().remove(account_id) {
+                break;
+            }
+            tracing::debug!("sync: {account_id} 期间又有新动静，继续同步");
+        }
+        // Report the whole run, not just its last pass.
+        if result.is_ok() {
+            result = Ok(total);
+        }
 
         self.in_flight.lock().unwrap().remove(account_id);
         match &result {
@@ -563,9 +598,17 @@ impl SyncEngine {
             format!("{} <{}>", msg.from_name, msg.from_addr)
         };
 
+        // Whether a configured channel will carry this one. Computed before the
+        // popup so the shell can decide whether its own notification would be a
+        // duplicate rather than the only copy.
+        let routed = channels
+            .iter()
+            .any(|ch| ch.enabled && ch.notify_categories.contains(&analysis.category));
+
         match analysis.category {
             Category::Verification | Category::Important => {
                 self.sink.alert(&AlertEvent {
+                    routed,
                     message_id: msg.id.clone(),
                     category: analysis.category,
                     account_email: account_email.clone(),
@@ -713,6 +756,45 @@ mod tests {
 
     fn seeded_store() -> Arc<Store> {
         seeded_store_with(1)
+    }
+
+    /// A sync requested while one is already running must not be thrown away.
+    ///
+    /// This is the whole reason "live" mail could be minutes late: an IDLE
+    /// wake landing during a classification cycle used to return `Ok(0)` and
+    /// vanish, leaving mail that had already arrived to wait for the next
+    /// scheduled tick.
+    #[test]
+    fn a_sync_requested_mid_sync_is_remembered_not_dropped() {
+        let engine = SyncEngine::new(seeded_store(), Box::new(NullSink));
+        // Stand in for a pass that is under way.
+        engine.in_flight.lock().unwrap().insert("acc1".to_string());
+
+        let dropped = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(engine.sync_account("acc1"))
+            .unwrap();
+
+        assert_eq!(dropped, 0, "it does not sync on top of the running pass");
+        assert!(
+            engine.resync.lock().unwrap().contains("acc1"),
+            "but it leaves a note so the running pass goes round again"
+        );
+    }
+
+    /// The note is per-account: a busy mailbox must not drag an idle one into
+    /// an extra pass.
+    #[test]
+    fn the_follow_up_note_does_not_leak_between_accounts() {
+        let engine = SyncEngine::new(seeded_store_with(2), Box::new(NullSink));
+        engine.in_flight.lock().unwrap().insert("acc1".to_string());
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(engine.sync_account("acc1")).unwrap();
+
+        let resync = engine.resync.lock().unwrap();
+        assert!(resync.contains("acc1"));
+        assert!(!resync.contains("acc2"));
     }
 
     /// An account plus `count` unclassified messages.

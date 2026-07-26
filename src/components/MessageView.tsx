@@ -214,7 +214,9 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
   // Whether reply-all would reach anyone the plain reply would not. Counting
   // recipients is enough: a mail addressed only to this user has exactly one,
   // and the backend drops the user's own addresses either way.
-  const othersOnThread = msg.toAddrs.length + msg.ccAddrs.length > 1;
+  // Defensive on both lists: a payload missing one of them should cost the
+  // reply-all button, not the whole reading pane.
+  const othersOnThread = (msg.toAddrs?.length ?? 0) + (msg.ccAddrs?.length ?? 0) > 1;
   const analysis = msg.analysis;
   /** Monogram for the letterhead — same convention as the sidebar accounts. */
   const monogram = (msg.fromName || msg.fromAddr).trim().charAt(0) || "?";
@@ -405,7 +407,7 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
             {/* Who else can see this. Shown because reply-all will write to
                 them, and a recipient list you cannot check is one you cannot
                 correct before sending. */}
-            {msg.ccAddrs.length > 0 && (
+            {(msg.ccAddrs?.length ?? 0) > 0 && (
               <p className="mv-to">
                 <span className="mv-to-label">抄送</span>
                 <span className="mv-addr">{msg.ccAddrs.join("、")}</span>

@@ -1117,6 +1117,24 @@ impl Store {
         })
     }
 
+    /// Star or unstar a batch in one transaction.
+    ///
+    /// The same reason `set_read` takes a list: in WAL mode every bare execute
+    /// is its own commit, so starring a selection of forty would be forty disk
+    /// writes for one click.
+    pub fn set_starred_many(&self, ids: &[String], starred: bool) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_tx(|c| {
+            let mut stmt = c.prepare("UPDATE messages SET starred=?2 WHERE id=?1")?;
+            for id in ids {
+                stmt.execute(params![id, starred as i64])?;
+            }
+            Ok(())
+        })
+    }
+
     /// Soft delete locally. Server-side deletion is handled by the sync layer.
     pub fn soft_delete(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {

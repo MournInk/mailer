@@ -28,8 +28,16 @@ struct TauriSink {
 
 impl EventSink for TauriSink {
     fn alert(&self, event: &AlertEvent) {
-        // In-app popup (modal / toast) for the running window.
+        // In-app popup (modal / toast) for the running window. Always: this is
+        // the app's own surface, not a notification budget.
         let _ = self.app.emit("mailer://alert", event);
+
+        // A configured channel is already carrying this one to wherever the
+        // user actually wants to be interrupted. Ringing here as well spends a
+        // system notification to say the same thing twice.
+        if event.routed {
+            return;
+        }
 
         // System notification even when the window is hidden.
         let (title, body) = match event.category {
@@ -120,6 +128,7 @@ pub fn run() {
             commands::get_message,
             commands::mark_read,
             commands::set_starred,
+            commands::set_starred_many,
             commands::delete_messages,
             commands::sync_now,
             commands::sync_statuses,

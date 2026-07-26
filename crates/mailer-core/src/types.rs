@@ -448,6 +448,12 @@ pub struct SyncStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertEvent {
+    /// True when an external channel (Telegram, Bark, webhook…) is already
+    /// carrying this alert. The desktop shell uses it to skip its own system
+    /// notification — two buzzes for one mail is one too many, and the user
+    /// configured the channel precisely so the phone would be the one to ring.
+    #[serde(default)]
+    pub routed: bool,
     pub message_id: String,
     pub category: Category,
     pub account_email: String,

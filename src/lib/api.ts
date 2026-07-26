@@ -72,6 +72,9 @@ export const markRead = (ids: string[], read: boolean) =>
   invoke<void>("mark_read", { ids, read });
 export const setStarred = (id: string, starred: boolean) =>
   invoke<void>("set_starred", { id, starred });
+/** Star or unstar a whole selection in one transaction. */
+export const setStarredMany = (ids: string[], starred: boolean) =>
+  invoke<void>("set_starred_many", { ids, starred });
 /**
  * Delete messages. Resolves with what actually went — a server that refused
  * still has the mail, and the caller has to restore those rows.

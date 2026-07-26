@@ -48,8 +48,9 @@ export function MessageList() {
     sync,
     pushToast,
     markRead,
+    starMany,
     remove,
-    openCompose,
+    composeFrom,
   } = useApp();
 
   // Multi-select: Ctrl/Cmd-click adds one, Shift-click takes a range from the
@@ -188,7 +189,45 @@ export function MessageList() {
     [anchor, page.items, select],
   );
 
+  /**
+   * Toggle one row's checkbox, with Shift for a range.
+   *
+   * Separate from `onRowClick`: a click on the checkbox selects, a click on the
+   * row opens. Conflating them is what makes a list feel like it is guessing.
+   */
+  const togglePick = useCallback(
+    (id: string, e?: { shiftKey?: boolean }) => {
+      const ids = page.items.map((m) => m.id);
+      setPicked((prev) => {
+        const next = new Set(prev);
+        if (e?.shiftKey && anchor) {
+          const a = ids.indexOf(anchor);
+          const b = ids.indexOf(id);
+          if (a >= 0 && b >= 0) {
+            for (const mid of ids.slice(Math.min(a, b), Math.max(a, b) + 1)) next.add(mid);
+            return next;
+          }
+        }
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      if (!e?.shiftKey) setAnchor(id);
+    },
+    [anchor, page.items],
+  );
+
   const clearPicked = useCallback(() => setPicked(new Set()), []);
+
+  const allPicked = items.length > 0 && picked.size === items.length;
+  const somePicked = picked.size > 0 && !allPicked;
+
+  /** The header box: none → all, some → all, all → none. */
+  const toggleAll = useCallback(() => {
+    setPicked((prev) =>
+      prev.size === items.length ? new Set() : new Set(items.map((m) => m.id)),
+    );
+  }, [items]);
 
   const bulk = useCallback(
     async (fn: (ids: string[]) => Promise<void>) => {
@@ -218,13 +257,21 @@ export function MessageList() {
           label: "回复",
           icon: "reply",
           disabled: many,
-          run: () =>
-            openCompose({
-              accountId: item.accountId,
-              to: item.fromAddr,
-              subject: item.subject.startsWith("Re:") ? item.subject : `Re: ${item.subject}`,
-              inReplyTo: item.id,
-            }),
+          run: () => void composeFrom(item.id, "reply"),
+        },
+        {
+          id: "reply-all",
+          label: "回复全部",
+          icon: "reply-all",
+          disabled: many,
+          run: () => void composeFrom(item.id, "reply_all"),
+        },
+        {
+          id: "forward",
+          label: "转发",
+          icon: "forward",
+          disabled: many,
+          run: () => void composeFrom(item.id, "forward"),
         },
         SEP,
         {
@@ -241,10 +288,16 @@ export function MessageList() {
         },
         {
           id: "star",
-          label: item.starred ? "取消星标" : "加星标",
+          label: many
+            ? `${item.starred ? "取消" : "加"}星标（${target.length} 封）`
+            : item.starred
+              ? "取消星标"
+              : "加星标",
           icon: "star",
-          disabled: many,
-          run: () => void toggleStar(item.id, !item.starred),
+          run: () =>
+            many
+              ? void starMany(target, !item.starred)
+              : void toggleStar(item.id, !item.starred),
         },
         SEP,
       ];
@@ -269,12 +322,13 @@ export function MessageList() {
         },
         SEP,
         {
-          // Same meaning as the button in the reading pane and the one in the
-          // selection bar: gone here and gone on the server. The label says so,
-          // because a "删除" that only hid the mail locally is what the old
-          // dropdown offered and nobody should have to remember which is which.
+          // Literally the same call as the button in the reading pane and the
+          // one in the selection bar — optimistic here, silent on the server,
+          // rows restored with a warning if it refused. So it reads the same
+          // too: a differently-worded label on identical behaviour is a reason
+          // to stop and wonder which one this is.
           id: "delete",
-          label: many ? `删除 ${target.length} 封（含服务器）` : "删除（含服务器）",
+          label: many ? `删除 ${target.length} 封` : "删除",
           icon: "trash",
           danger: true,
           run: async () => {
@@ -291,8 +345,8 @@ export function MessageList() {
       openAt(e, items);
     },
     [
-      clearPicked, copyCode, markRead, openAt, openCompose, picked, pushToast,
-      remove, select, toggleStar,
+      clearPicked, composeFrom, copyCode, markRead, openAt, picked, pushToast,
+      remove, select, starMany, toggleStar,
     ],
   );
 
@@ -310,9 +364,20 @@ export function MessageList() {
       } else if (e.key === "Enter") {
         e.preventDefault();
         open(cursorId ?? items[0].id);
+      } else if (e.key === "x" || e.key === "X") {
+        // Gmail's key, and the one Outlook's web client copied: tick the row
+        // under the cursor without opening it.
+        e.preventDefault();
+        togglePick(cursorId ?? items[0].id, e);
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+        e.preventDefault();
+        toggleAll();
+      } else if (e.key === "Escape" && picked.size > 0) {
+        e.preventDefault();
+        clearPicked();
       }
     },
-    [items, cursorId, open],
+    [items, cursorId, open, togglePick, toggleAll, picked.size, clearPicked],
   );
 
   // -- infinite scroll ------------------------------------------------------
@@ -377,6 +442,23 @@ export function MessageList() {
         </div>
 
         <div className="ml-scope">
+          {/* Select-all, where Outlook, 163 and Gmail all put it: at the head of
+              the column, above the rail the row boxes sit in. */}
+          {items.length > 0 && (
+            <input
+              type="checkbox"
+              className="ml-scope-check"
+              checked={allPicked}
+              ref={(el) => {
+                // Partial selection is neither checked nor unchecked, and only
+                // the DOM property can say so.
+                if (el) el.indeterminate = somePicked;
+              }}
+              aria-label={allPicked ? "取消全选" : "全选本页"}
+              title={allPicked ? "取消全选" : "全选本页"}
+              onChange={toggleAll}
+            />
+          )}
           <span className="ml-scope-lead">
             <span className="ml-scope-name">{scope}</span>
             {scopeHint && <span className="ml-scope-hint">{scopeHint}</span>}
@@ -416,6 +498,18 @@ export function MessageList() {
           <button className="btn" onClick={() => void bulk((ids) => markRead(ids, false))}>
             标记未读
           </button>
+          <button className="btn" onClick={() => void bulk((ids) => starMany(ids, true))}>
+            <Icon name="star" size={14} />
+            加星标
+          </button>
+          <button className="btn" onClick={() => void bulk((ids) => starMany(ids, false))}>
+            取消星标
+          </button>
+          {!allPicked && (
+            <button className="btn" onClick={toggleAll}>
+              全选本页
+            </button>
+          )}
           <button
             className="btn btn-danger"
             onClick={() => void bulk((ids) => remove(ids))}
@@ -438,7 +532,7 @@ export function MessageList() {
         role="listbox"
         aria-label="邮件列表"
       >
-        <div className="ml-rows">
+        <div className={`ml-rows${picked.size > 0 ? " ml-list-picking" : ""}`}>
         {showSkeleton ? (
           <div className="ml-skeletons" aria-hidden>
             {Array.from({ length: SKELETON_ROWS }, (_, i) => (
@@ -479,6 +573,7 @@ export function MessageList() {
                 onToggleStar={toggleStar}
                 onCopyCode={copyCode}
                 picked={picked.has(m.id)}
+                onPick={togglePick}
                 /* Which mailbox took delivery. Shown whenever the list is not
                    already narrowed to one account — including with a single
                    account configured, where it used to be hidden and the answer
@@ -522,6 +617,7 @@ function MessageRow({
   onCopyCode,
   registerRow,
   picked,
+  onPick,
   showAccount,
   accountLabel,
   onRowClick,
@@ -535,6 +631,7 @@ function MessageRow({
   onCopyCode: (code: string) => Promise<void>;
   registerRow: (id: string, el: HTMLDivElement | null) => void;
   picked: boolean;
+  onPick: (id: string, e: MouseEvent) => void;
   /** Which mailbox received it — shown only when the list spans accounts. */
   showAccount: boolean;
   accountLabel: string;
@@ -566,8 +663,19 @@ function MessageRow({
       role="option"
       aria-selected={selected || picked}
     >
-      <span className="ml-row-rail" aria-hidden>
-        <span className="ml-row-dot" />
+      {/* The rail is the selection gutter, the way it is in Outlook, 163 and
+          Gmail. The unread dot sits behind the box and fades out once the row
+          is picked — at that point "selected" is what the row is saying. */}
+      <span className="ml-row-rail">
+        <span className="ml-row-dot" aria-hidden />
+        <input
+          type="checkbox"
+          className="ml-row-check"
+          checked={picked}
+          aria-label={`选择「${item.subject || "(无主题)"}」`}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => onPick(item.id, e.nativeEvent as MouseEvent)}
+        />
       </span>
 
       <div className="ml-row-body">

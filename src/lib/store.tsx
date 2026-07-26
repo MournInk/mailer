@@ -119,6 +119,8 @@ interface AppStore {
   select: (id: string | null) => Promise<void>;
   toggleStar: (id: string, starred: boolean) => Promise<void>;
   markRead: (ids: string[], read: boolean) => Promise<void>;
+  /** Star or unstar a selection. */
+  starMany: (ids: string[], starred: boolean) => Promise<void>;
   /**
    * Delete mail. Defaults to deleting on the server too — in this app "删除"
    * means the message is gone, not merely hidden here. Optimistic: the rows go
@@ -367,6 +369,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
           items: p.items.map((m) => (m.id === id ? { ...m, starred } : m)),
         }));
         setSelected((s) => (s && s.id === id ? { ...s, starred } : s));
+      } catch (e) {
+        pushToast("error", `操作失败: ${e}`);
+      }
+    },
+    [pushToast],
+  );
+
+  const starMany = useCallback(
+    async (ids: string[], starred: boolean) => {
+      if (ids.length === 0) return;
+      try {
+        await api.setStarredMany(ids, starred);
+        setPage((p) => ({
+          ...p,
+          items: p.items.map((m) => (ids.includes(m.id) ? { ...m, starred } : m)),
+        }));
+        setSelected((s) => (s && ids.includes(s.id) ? { ...s, starred } : s));
       } catch (e) {
         pushToast("error", `操作失败: ${e}`);
       }
@@ -635,6 +654,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       select,
       toggleStar,
       markRead: markReadAction,
+      starMany,
       remove,
       sync,
       openSettings,
@@ -661,7 +681,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       loadingList, loadingMore, view, settingsTab, theme, blockTrackers, groupThreads, alerts, toasts, compose,
       labels, labelCounts, refreshLabels,
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
-      markReadAction, remove, sync, openSettings, closeSettings, setTheme, setGroupThreads,
+      markReadAction, starMany, remove, sync, openSettings, closeSettings, setTheme, setGroupThreads,
       pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, composeFrom, closeCompose,
       assistantOpen, paletteOpen, shortcutsOpen,
     ],

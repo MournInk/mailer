@@ -271,7 +271,11 @@
 
 /* -- row: unread rail ------------------------------------------------------ */
 
+/* The rail holds two things in the same
+   spot: the unread dot, and the selection box that covers it. Stacking rather
+   than reserving a second column keeps the row as narrow as it was. */
 .ml-row-rail {
+  position: relative;
   display: flex;
   justify-content: center;
   height: var(--ml-line);
@@ -283,10 +287,78 @@
   height: var(--ml-rail);
   border-radius: 50%;
   background: transparent;
-  transition: background var(--dur-base) var(--ease-out);
+  transition: background var(--dur-base) var(--ease-out),
+    opacity var(--dur-base) var(--ease-out);
 }
 .ml-row.unread .ml-row-dot {
   background: var(--accent);
+}
+
+/* Hidden until the pointer is over the row, or something is already picked —
+   Gmail's rule. A column of empty boxes down a mailbox you are only reading is
+   forty affordances for a thing you are not doing. */
+.ml-row-check {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.ml-row:hover .ml-row-check,
+.ml-row-check:focus-visible,
+.ml-row-check:checked,
+.ml-list-picking .ml-row-check {
+  opacity: 1;
+}
+/* Once the box is showing, the dot underneath would read as a smudge. */
+.ml-row:hover .ml-row-dot,
+.ml-row.picked .ml-row-dot,
+.ml-list-picking .ml-row-dot {
+  opacity: 0;
+}
+
+/* The batch toolbar. It appears in a column ~500px wide with five actions in
+   it, so it wraps rather than overflowing — and the count is pinned on one
+   line, because a number reading vertically down the left edge is the first
+   thing that looks broken. */
+.ml-selbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px var(--ml-pad-x);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.ml-selbar-count {
+  flex: none;
+  margin-right: 2px;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ml-selbar .btn {
+  flex: none;
+}
+
+/* Pushes the dismiss button to the end of whichever row it lands on. */
+.ml-selbar .icon-btn {
+  margin-left: auto;
+}
+
+.ml-scope-check {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* -- row: three-line body -------------------------------------------------- */
