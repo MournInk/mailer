@@ -1,0 +1,217 @@
+name: Build
+
+# Desktop artifacts are real installers. Android produces an installable APK.
+# iOS is a compile check only: Apple requires a signing identity to produce an
+# .ipa, and this workflow does not assume one exists.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (universal)
+            os: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+            artifact: mailer-macos-universal
+          - name: Windows (x64)
+            os: windows-latest
+            rust-targets: ""
+            args: ""
+            artifact: mailer-windows-x64
+          # 22.04 keeps the glibc floor low enough for older distros.
+          - name: Linux (x64)
+            os: ubuntu-22.04
+            rust-targets: ""
+            args: ""
+            artifact: mailer-linux-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.artifact }}
+
+      - run: npm ci
+
+      - name: Build application
+        run: npm run tauri build -- ${{ matrix.args }}
+
+      # The workspace puts target/ at the repo root; a --target build nests one
+      # directory deeper, so both shapes are collected.
+      - name: Collect installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.rpm
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.exe
+            target/*/release/bundle/**/*.deb
+            target/*/release/bundle/**/*.rpm
+            target/*/release/bundle/**/*.AppImage
+            target/*/release/bundle/**/*.dmg
+            target/*/release/bundle/**/*.msi
+            target/*/release/bundle/**/*.exe
+
+  android:
+    name: Android (APK)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          local-cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - run: npm ci
+
+      # gen/android is generated, not committed, so it has to be created here.
+      - name: Initialize Android project
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: npm run tauri android init -- --ci
+
+      # An unsigned release APK cannot be installed, and this workflow carries
+      # no keystore, so the artifact is the debug-signed build. Shipping to a
+      # store means adding a keystore and switching this to `--release`.
+      - name: Build APK
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: npm run tauri android build -- --debug --apk
+
+      - name: Collect APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailer-android-debug
+          if-no-files-found: error
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+  ios:
+    name: iOS (compile check)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+
+      - run: npm ci
+
+      - name: Initialize iOS project
+        run: npm run tauri ios init -- --ci
+
+      # A distributable .ipa needs an Apple signing identity, which this
+      # workflow deliberately does not carry. Building the simulator target
+      # with signing disabled still proves the Rust and web layers compile and
+      # link for iOS — which is what this job is for. The project name and
+      # scheme are discovered rather than assumed, since both follow
+      # productName and its casing.
+      - name: Build for simulator without signing
+        run: |
+          set -euo pipefail
+          npm run build
+          project=$(ls -d src-tauri/gen/apple/*.xcodeproj | head -1)
+          scheme=$(xcodebuild -project "$project" -list \
+            | awk '/Schemes:/{found=1; next} found && NF {print $1; exit}')
+          echo "Building $project (scheme $scheme)"
+          xcodebuild \
+            -project "$project" \
+            -scheme "$scheme" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  release:
+    name: Publish release
+    needs: [desktop, android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Drafted rather than published: the maintainer decides when it goes out.
+      - name: Attach artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: artifacts/**/*
