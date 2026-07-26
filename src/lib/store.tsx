@@ -94,7 +94,12 @@ interface AppStore {
   select: (id: string | null) => Promise<void>;
   toggleStar: (id: string, starred: boolean) => Promise<void>;
   markRead: (ids: string[], read: boolean) => Promise<void>;
-  remove: (ids: string[], onServer: boolean) => Promise<void>;
+  /**
+   * Delete mail. Defaults to deleting on the server too — in this app "删除"
+   * means the message is gone, not merely hidden here. Optimistic: the rows go
+   * immediately and come back if the server refuses.
+   */
+  remove: (ids: string[], onServer?: boolean) => Promise<void>;
   sync: (accountId?: string | null) => Promise<void>;
   openSettings: (tab?: SettingsTab) => void;
   closeSettings: () => void;
@@ -299,18 +304,53 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [pushToast, refreshList],
   );
 
+  /**
+   * Delete mail, optimistically.
+   *
+   * Deleting on the server is a network round trip; waiting for it before the
+   * row disappears makes the app feel broken on a slow mailbox. So the rows go
+   * first and the request follows. If the server refused, the backend reports
+   * which ids it kept and they come back with a warning — a delete that silently
+   * failed would otherwise reappear at the next sync with no explanation.
+   */
   const remove = useCallback(
-    async (ids: string[], onServer: boolean) => {
+    async (ids: string[], onServer = true) => {
+      if (ids.length === 0) return;
+      const gone = new Set(ids);
+
+      // Hide them now. Computed from the current page rather than counted inside
+      // the updater: React invokes updaters twice under StrictMode, and a
+      // counter incremented in there would decrement the totals twice.
+      const cur = pageRef.current;
+      const dropped = cur.items.filter((m) => gone.has(m.id));
+      setPage({
+        items: cur.items.filter((m) => !gone.has(m.id)),
+        total: Math.max(0, cur.total - dropped.length),
+        unread: Math.max(0, cur.unread - dropped.filter((m) => m.unread).length),
+      });
+      const wasOpen = selectedId !== null && gone.has(selectedId);
+      if (wasOpen) {
+        setSelected(null);
+        setSelectedId(null);
+      }
+
       try {
-        await api.deleteMessages(ids, onServer);
-        if (selectedId && ids.includes(selectedId)) {
-          setSelected(null);
-          setSelectedId(null);
+        const report = await api.deleteMessages(ids, onServer);
+        if (report.failed.length > 0) {
+          // The mail is still on the server, so it has to be visible again.
+          await refreshList();
+          pushToast(
+            "error",
+            `${report.failed.length} 封邮件删除失败，已恢复显示：${report.error ?? "服务器未说明原因"}`,
+          );
+          return;
         }
-        await refreshList();
-        pushToast("ok", onServer ? "已删除（含服务器）" : "已从本地删除");
+        // The counters were adjusted from the loaded page only; a full refresh
+        // reconciles them with the rest of the mailbox and pulls in the next row.
+        void refreshList();
       } catch (e) {
-        pushToast("error", `删除失败: ${e}`);
+        await refreshList();
+        pushToast("error", `删除失败，已恢复显示: ${e}`);
       }
     },
     [pushToast, refreshList, selectedId],

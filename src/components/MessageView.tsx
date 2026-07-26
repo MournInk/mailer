@@ -6,11 +6,13 @@
  *    (DOMPurify) before it can reach `dangerouslySetInnerHTML`, and remote
  *    images are parked in `data-src` until the user asks for them, because a
  *    remote image in mail is a read receipt for the sender.
- *  - Server-side deletion is irreversible, so the delete control defaults to a
- *    local-only delete and hides the server variant behind a confirmation.
+ *  - Deleting means deleting: one button, and the message goes from here and
+ *    from the server. The row disappears before the round trip finishes and
+ *    comes back if the server refused it, which is a truer safety net than a
+ *    confirmation dialog nobody reads.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import * as api from "../lib/api";
 import { formatFullDate, useApp } from "../lib/store";
@@ -267,7 +269,17 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
           <span className="mv-act-sep" aria-hidden="true" />
 
-          <DeleteControl onDelete={(onServer) => void remove([msg.id], onServer)} />
+          {/* One button, one meaning: the message is deleted, here and on the
+              server. It disappears at once and comes back if the server
+              refused — see `remove` in the store. */}
+          <button
+            className="btn btn-ghost btn-sm mv-act mv-del"
+            onClick={() => void remove([msg.id])}
+            title="删除邮件（同时从服务器删除）"
+          >
+            <Icon name="trash" size={15} />
+            <span className="mv-bar-text">删除</span>
+          </button>
         </div>
       </header>
 
@@ -432,115 +444,6 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
         </article>
       </div>
     </>
-  );
-}
-
-/**
- * Split delete control: the button itself does the safe thing (local only),
- * the caret opens the server variant, which asks once before it fires.
- */
-function DeleteControl({ onDelete }: { onDelete: (onServer: boolean) => void }) {
-  const [open, setOpen] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-
-  // close on outside click / Escape
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  // every re-open starts from the non-destructive state
-  useEffect(() => {
-    if (!open) setConfirming(false);
-  }, [open]);
-
-  return (
-    <div className="mv-del" ref={wrapRef}>
-      <button
-        className="btn btn-ghost btn-sm mv-act mv-del-main"
-        onClick={() => onDelete(false)}
-        title="仅从本地删除（服务器上的邮件保留）"
-      >
-        <Icon name="trash" size={15} />
-        <span className="mv-bar-text">删除</span>
-      </button>
-      <button
-        className="btn btn-ghost btn-sm mv-act mv-del-caret"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label="删除选项"
-        title="删除选项"
-      >
-        <Icon name="chevron-down" size={13} />
-      </button>
-
-      {open && (
-        <div className="card mv-menu fade-up" role="menu">
-          {confirming ? (
-            <>
-              <p className="mv-menu-warn">
-                将同时删除服务器上的邮件，此操作无法撤销。
-              </p>
-              <div className="mv-menu-actions">
-                <button className="btn btn-sm" onClick={() => setConfirming(false)}>
-                  取消
-                </button>
-                <button
-                  className="btn btn-sm btn-danger"
-                  onClick={() => {
-                    setOpen(false);
-                    onDelete(true);
-                  }}
-                >
-                  确认删除
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <button
-                className="mv-menu-item"
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false);
-                  onDelete(false);
-                }}
-              >
-                <Icon name="trash" size={15} />
-                <span className="mv-menu-text">
-                  <span className="mv-menu-title">仅本地</span>
-                  <span className="mv-menu-hint">默认 · 服务器上仍保留</span>
-                </span>
-              </button>
-              <button
-                className="mv-menu-item danger"
-                role="menuitem"
-                onClick={() => setConfirming(true)}
-              >
-                <Icon name="alert" size={15} />
-                <span className="mv-menu-text">
-                  <span className="mv-menu-title">同时删除服务器</span>
-                  <span className="mv-menu-hint">不可撤销</span>
-                </span>
-              </button>
-            </>
-          )}
-        </div>
-      )}
-    </div>
   );
 }
 

@@ -40,7 +40,7 @@ const SHEET: Array<{ group: string; rows: Array<[string, string]> }> = [
       ["/", "搜索"],
       ["R", "回复当前邮件"],
       ["S", "加/取消星标"],
-      ["#", "删除当前邮件（仅本地）"],
+      ["#", "删除当前邮件（同时删除服务器）"],
       ["U", "返回列表"],
     ],
   },
@@ -200,7 +200,7 @@ export function ShortcutListener() {
         case "#":
           if (app.selectedId) {
             e.preventDefault();
-            void app.remove([app.selectedId], false);
+            void app.remove([app.selectedId]);
           }
           break;
         default:

@@ -436,50 +436,75 @@ impl SyncEngine {
     }
 
     /// Delete messages locally (soft) and — when `on_server` — remotely too.
-    /// Server-side deletion is best-effort: local state always wins.
-    pub async fn delete_messages(&self, ids: &[String], on_server: bool) {
-        // Resolve UIDs/accounts before the local delete hides the rows.
-        let mut groups: HashMap<(String, String), Vec<String>> = HashMap::new();
+    ///
+    /// A server delete that fails leaves its messages **untouched**: they stay
+    /// visible, and the returned report names them. The UI hides a row the
+    /// moment the user asks, so a silent failure here would look exactly like a
+    /// success and the mail would reappear at the next sync with no explanation.
+    /// Local-only deletion cannot fail this way and always reports success.
+    pub async fn delete_messages(&self, ids: &[String], on_server: bool) -> DeleteReport {
+        // Resolve UIDs/accounts before the local delete hides the rows. A
+        // message that no longer resolves is already gone, which is the outcome
+        // being asked for, so it counts as deleted.
+        let mut groups: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
         let mut touched_accounts: HashSet<String> = HashSet::new();
+        let mut report = DeleteReport::default();
+
         for id in ids {
-            if let Ok(msg) = self.store.get_message(id) {
-                touched_accounts.insert(msg.account_id.clone());
-                groups
-                    .entry((msg.account_id.clone(), msg.folder.clone()))
-                    .or_default()
-                    .push(msg.uid.clone());
+            match self.store.get_message(id) {
+                Ok(msg) => {
+                    touched_accounts.insert(msg.account_id.clone());
+                    groups
+                        .entry((msg.account_id.clone(), msg.folder.clone()))
+                        .or_default()
+                        .push((id.clone(), msg.uid.clone()));
+                }
+                Err(_) => report.deleted.push(id.clone()),
             }
         }
 
-        if on_server {
-            for ((account_id, folder), uids) in &groups {
-                let account = match self.store.get_account(account_id) {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
-                let res = match account.protocol {
+        for ((account_id, folder), targets) in &groups {
+            let (ids_here, uids): (Vec<String>, Vec<String>) = targets.iter().cloned().unzip();
+            if !on_server {
+                report.deleted.extend(ids_here);
+                continue;
+            }
+
+            let outcome = match self.store.get_account(account_id) {
+                Ok(account) => match account.protocol {
                     Protocol::Imap => {
-                        with_timeout(DELETE_TIMEOUT, "删除", imap::delete(&account, folder, uids))
+                        with_timeout(DELETE_TIMEOUT, "删除", imap::delete(&account, folder, &uids))
                             .await
                             .and_then(|r| r)
                     }
                     Protocol::Pop3 => {
-                        with_timeout(DELETE_TIMEOUT, "删除", pop3::delete(&account, uids))
+                        with_timeout(DELETE_TIMEOUT, "删除", pop3::delete(&account, &uids))
                             .await
                             .and_then(|r| r)
                     }
-                };
-                if let Err(e) = res {
-                    tracing::warn!("server delete on {account_id} failed (kept local delete): {e}");
+                },
+                Err(e) => Err(e),
+            };
+
+            match outcome {
+                Ok(()) => report.deleted.extend(ids_here),
+                Err(e) => {
+                    tracing::warn!("server delete on {account_id} failed, keeping the mail: {e}");
+                    report.failed.extend(ids_here);
+                    // The first failure is the one worth showing; a second
+                    // account's timeout says nothing new.
+                    report.error.get_or_insert_with(|| e.to_string());
                 }
             }
         }
-        if let Err(e) = self.store.soft_delete(ids) {
+
+        if let Err(e) = self.store.soft_delete(&report.deleted) {
             tracing::error!("local delete failed: {e}");
         }
         for account_id in touched_accounts {
             self.sink.mail_changed(&account_id);
         }
+        report
     }
 
     /// Re-run classification for a single message (user action).
@@ -658,11 +683,49 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
 
-        engine.delete_messages(&["m1".to_string()], false).await;
+        let report = engine.delete_messages(&["m1".to_string()], false).await;
 
+        assert!(report.ok(), "a local delete cannot fail: {report:?}");
+        assert_eq!(report.deleted, vec!["m1".to_string()]);
         assert!(store.get_message("m1").is_err());
         assert_eq!(store.query_messages(&MessageQuery::default()).unwrap().total, 0);
         assert_eq!(sink.changed.lock().unwrap().as_slice(), ["acc1"]);
+    }
+
+    /// A server that refuses the delete still has the mail. Hiding it locally
+    /// anyway would look like success and then undo itself at the next sync, so
+    /// the message stays and the report names it.
+    #[tokio::test]
+    async fn a_refused_server_delete_keeps_the_message() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        // The seeded account points at a host that does not resolve, so the
+        // IMAP round trip fails without a server to talk to.
+        let report = engine.delete_messages(&["m1".to_string()], true).await;
+
+        assert!(!report.ok(), "the delete did not happen");
+        assert_eq!(report.failed, vec!["m1".to_string()]);
+        assert!(report.deleted.is_empty());
+        assert!(report.error.is_some(), "a failure needs a reason to show");
+        // Still there, still readable.
+        assert!(store.get_message("m1").is_ok());
+        assert_eq!(store.query_messages(&MessageQuery::default()).unwrap().total, 1);
+    }
+
+    /// An id that no longer resolves is already in the state the caller asked
+    /// for, so it counts as deleted rather than as a failure to report.
+    #[tokio::test]
+    async fn deleting_a_message_that_is_already_gone_succeeds() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        let report = engine.delete_messages(&["ghost".to_string()], true).await;
+
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(report.deleted, vec!["ghost".to_string()]);
     }
 
     /// A server that accepts the connection and then goes silent must not pin

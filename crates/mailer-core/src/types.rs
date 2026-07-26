@@ -428,6 +428,29 @@ pub struct AlertEvent {
     pub verification_code: Option<String>,
 }
 
+/// What a delete attempt actually managed to do.
+///
+/// Deleting on the server is a network round trip that can fail, and the UI
+/// hides the row before it starts. So it has to be told, per message, whether
+/// the deletion stuck — a row it hid on a request the server refused has to
+/// come back.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteReport {
+    /// Gone: hidden locally, and removed on the server when that was asked for.
+    pub deleted: Vec<String>,
+    /// Left exactly as they were, because the server refused.
+    pub failed: Vec<String>,
+    /// Why, in one line the user can read. Set iff `failed` is non-empty.
+    pub error: Option<String>,
+}
+
+impl DeleteReport {
+    pub fn ok(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
 /// Result of a connectivity test (account or channel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -148,11 +148,11 @@ export function CommandPalette() {
         {
           id: "delete",
           label: "删除当前邮件",
-          hint: "仅本地",
+          hint: "同时删除服务器",
           icon: "trash",
           keywords: "delete remove sc",
           shortcut: "#",
-          run: () => void remove([selectedId], false),
+          run: () => void remove([selectedId]),
         },
       );
     }

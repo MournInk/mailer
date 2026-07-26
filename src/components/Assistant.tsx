@@ -1,8 +1,14 @@
 /**
- * The assistant panel — ask the mailbox questions in plain language.
+ * The assistant — ask the mailbox questions in plain language.
  *
  * Everything it can do already exists in the backend (retrieval over the
  * embedding index, memory, the shared tool layer); this is the door.
+ *
+ * It floats over the app instead of taking a column in it: as a fourth pane it
+ * squeezed the reading pane until long subjects wrapped one character per line,
+ * and a conversation about your mail is something you dip into and dismiss, not
+ * a permanent third of the window. Closed, it collapses to a launcher in the
+ * corner, the way a site's chat widget does.
  *
  * Two things are deliberate:
  *  - Sending mail is never done on the model's word. When the assistant wants
@@ -13,8 +19,9 @@
  *    message is clickable straight into the reading pane.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import { renderRichText } from "../lib/richText";
 import { formatDate, useApp } from "../lib/store";
 import type { ChatTurn, PendingAction, SearchHit } from "../lib/types";
 import { Icon } from "./Icon";
@@ -109,7 +116,21 @@ export function Assistant() {
     inputRef.current?.focus();
   }, []);
 
-  if (!assistantOpen) return null;
+  // Closed, the assistant is a launcher parked in the corner — the live-chat
+  // convention, and the one place on screen nothing else competes for.
+  if (!assistantOpen) {
+    return (
+      <button
+        className="asst-launcher"
+        onClick={() => setAssistantOpen(true)}
+        title="AI 助手（Ctrl/⌘ + J）"
+        aria-label="打开 AI 助手"
+      >
+        <Icon name="spark" size={20} />
+        {turns.length > 0 && <span className="asst-launcher-dot" aria-hidden />}
+      </button>
+    );
+  }
 
   return (
     <aside className="asst" aria-label="AI 助手">
@@ -131,10 +152,10 @@ export function Assistant() {
           <button
             className="icon-btn"
             onClick={() => setAssistantOpen(false)}
-            title="关闭助手"
-            aria-label="关闭助手"
+            title="收起助手"
+            aria-label="收起助手"
           >
-            <Icon name="x" size={16} />
+            <Icon name="chevron-down" size={16} />
           </button>
         </div>
       </header>
@@ -234,10 +255,27 @@ function Turn({ turn, onOpen }: { turn: ChatTurn; onOpen: (id: string) => void }
         </ul>
       )}
 
-      <div className="asst-answer">{turn.content}</div>
+      <Answer text={turn.content} />
 
       {turn.citations.length > 0 && <Citations hits={turn.citations} onOpen={onOpen} />}
     </div>
+  );
+}
+
+/**
+ * The answer itself, as Markdown and LaTeX.
+ *
+ * `renderRichText` is the only thing allowed to produce this markup, and it
+ * sanitizes on the way out — the text is written by a model that has been
+ * reading mail from strangers.
+ */
+function Answer({ text }: { text: string }) {
+  const html = useMemo(() => renderRichText(text), [text]);
+  return (
+    <div
+      className="asst-answer"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 

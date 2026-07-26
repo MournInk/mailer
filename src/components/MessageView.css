@@ -144,93 +144,15 @@
   animation: mv-spin 900ms linear infinite;
 }
 
-/* -- delete split control -------------------------------------------------- */
+/* -- delete ---------------------------------------------------------------- */
 
 /* Destructive, but not loud: it stays in the ink ramp until the pointer is on
-   it, then commits to --danger for the whole split control at once. */
-.mv-del {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 0;
-}
-.mv-actions .mv-del-main {
-  padding-right: 5px;
-}
-.mv-actions .mv-del-caret {
-  padding: 0 5px;
-}
-/* wins over the generic `.mv-actions .mv-act:hover` above on purpose */
-.mv-bar .mv-actions .mv-del:hover .mv-act,
-.mv-bar .mv-actions .mv-del:focus-within .mv-act {
+   it, then commits to --danger. There is no second step to reveal — the row
+   coming back is what covers a mistake, not a menu. */
+.mv-bar .mv-actions .mv-del:hover,
+.mv-bar .mv-actions .mv-del:focus-visible {
   background: var(--danger-soft);
   color: var(--danger);
-}
-
-.mv-del .mv-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 10;
-  width: 236px;
-  padding: 5px;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
-}
-
-.mv-menu-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  width: 100%;
-  padding: 8px 9px;
-  border-radius: var(--radius-sm);
-  color: var(--ink-2);
-  text-align: left;
-  transition: background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-.mv-menu-item:hover {
-  background: var(--surface-hover);
-  color: var(--ink);
-}
-.mv-menu-item.danger {
-  color: var(--danger);
-}
-.mv-menu-item.danger:hover {
-  background: var(--danger-soft);
-}
-.mv-menu-item > svg {
-  margin-top: 2px;
-  flex-shrink: 0;
-}
-
-.mv-menu-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  line-height: 1.35;
-}
-.mv-menu-title {
-  font-size: var(--text-sm);
-  font-weight: 550;
-}
-.mv-menu-hint {
-  font-size: var(--text-xs);
-  color: var(--ink-3);
-}
-
-.mv-menu-warn {
-  padding: 9px 9px 8px;
-  font-size: var(--text-sm);
-  line-height: 1.5;
-  color: var(--ink-2);
-}
-.mv-menu-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  padding: 0 5px 4px;
 }
 
 /* -- document -------------------------------------------------------------- */
@@ -934,12 +856,6 @@
   .mv-imgbar .mv-imgbar-btn {
     height: 40px;
     padding: 0 16px;
-  }
-  .mv-menu-item {
-    padding: 11px 9px;
-  }
-  .mv-menu-actions .btn {
-    height: 40px;
   }
   .mv-disclosure {
     min-height: 40px;

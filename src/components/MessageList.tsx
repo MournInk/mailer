@@ -267,7 +267,7 @@ export function MessageList() {
           icon: "trash",
           danger: true,
           run: async () => {
-            await remove(target, false);
+            await remove(target);
             clearPicked();
           },
         },
@@ -397,7 +397,7 @@ export function MessageList() {
           </button>
           <button
             className="btn btn-danger"
-            onClick={() => void bulk((ids) => remove(ids, false))}
+            onClick={() => void bulk((ids) => remove(ids))}
           >
             <Icon name="trash" size={14} />
             删除

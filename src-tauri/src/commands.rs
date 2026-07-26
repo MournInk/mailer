@@ -248,14 +248,19 @@ pub fn set_starred(state: State<'_, AppState>, id: String, starred: bool) -> Cmd
     state.engine.store().set_starred(&id, starred).map_err(err_str)
 }
 
+/// Delete messages, reporting what actually went.
+///
+/// The list hides the rows before this is called, so the report is how it learns
+/// which ones to put back: a server that refused the delete still has the mail,
+/// and pretending otherwise would make it reappear at the next sync as if from
+/// nowhere.
 #[tauri::command]
 pub async fn delete_messages(
     state: State<'_, AppState>,
     ids: Vec<String>,
     on_server: bool,
-) -> CmdResult<()> {
-    state.engine.delete_messages(&ids, on_server).await;
-    Ok(())
+) -> CmdResult<DeleteReport> {
+    Ok(state.engine.delete_messages(&ids, on_server).await)
 }
 
 /// Trigger sync for one account, or all accounts when `account_id` is None.

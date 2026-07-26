@@ -226,6 +226,17 @@ export interface TestResult {
   message: string;
 }
 
+/**
+ * What a delete attempt actually managed to do. The list hides rows before the
+ * request is made, so `failed` is how it learns which ones to put back.
+ */
+export interface DeleteReport {
+  deleted: string[];
+  failed: string[];
+  /** Why, in one line. Set iff `failed` is non-empty. */
+  error: string | null;
+}
+
 export interface CategoryCount {
   category: string; // Category | "pending"
   total: number;

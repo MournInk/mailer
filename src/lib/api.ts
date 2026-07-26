@@ -17,6 +17,7 @@ import type {
   CategoryCount,
   ChatTurn,
   Conversation,
+  DeleteReport,
   EmailMessage,
   EmbeddingSettingsInput,
   EmbeddingSettingsPublic,
@@ -57,8 +58,12 @@ export const markRead = (ids: string[], read: boolean) =>
   invoke<void>("mark_read", { ids, read });
 export const setStarred = (id: string, starred: boolean) =>
   invoke<void>("set_starred", { id, starred });
+/**
+ * Delete messages. Resolves with what actually went — a server that refused
+ * still has the mail, and the caller has to restore those rows.
+ */
 export const deleteMessages = (ids: string[], onServer: boolean) =>
-  invoke<void>("delete_messages", { ids, onServer });
+  invoke<DeleteReport>("delete_messages", { ids, onServer });
 export const syncNow = (accountId?: string | null) =>
   invoke<void>("sync_now", { accountId: accountId ?? null });
 export const syncStatuses = () => invoke<SyncStatus[]>("sync_statuses");

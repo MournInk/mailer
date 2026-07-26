@@ -52,9 +52,18 @@ use crate::types::*;
 /// keeps asking for tools it has already run would otherwise bill the user
 /// forever. On the last round the model is told it may not call another tool;
 /// if it does anyway, the loop stops and answers from what it has.
-const MAX_TOOL_ITERATIONS: usize = 6;
-/// Reply budget for one round. Large enough for a real answer plus its envelope.
-const MAX_REPLY_TOKENS: u32 = 1500;
+///
+/// Eight rather than six because the prompt now asks for a second and third way
+/// of searching before concluding a message is not there: a keyword search, the
+/// same question in the other language, a look at what actually arrived, and
+/// then opening the one that matched is four rounds before a word is written.
+const MAX_TOOL_ITERATIONS: usize = 8;
+/// Reply budget for one round.
+///
+/// Generous on purpose. A reasoning model spends this same budget on its chain
+/// of thought, so a tight limit does not produce a shorter answer — it produces
+/// a truncated one, or thinking with no answer left after it.
+const MAX_REPLY_TOKENS: u32 = 3000;
 /// Earlier turns replayed into the prompt.
 const MAX_HISTORY_TURNS: usize = 12;
 /// Characters kept from any one earlier turn.
@@ -499,17 +508,37 @@ fn system_prompt(specs: &[tools::ToolSpec], memories: &[MemoryEntry]) -> String 
 triage what arrived, answer questions about their mail history, and draft mail. Their mail lives on
 this machine; you reach it only through the tools listed below.
 
-HOW YOU ANSWER — your reply text is shown to the user exactly as you write it.
-- Write plain prose in the user's language (default 中文). No JSON, no envelope, no markdown fences,
-  no mention of tools or of how you work. A reply that contains JSON is a bug the user sees.
-- To use a tool, call it through the tool interface. Never describe a call, and never write one out
-  as JSON in your reply — text is not a tool call and nothing will run.
-- After a tool runs you are given its result and asked again, so work one step at a time.
-- Look things up instead of guessing. You do not know what is in this mailbox until you read it.
-- Say what you found and what you did not. If a search comes back empty, say so; never invent a
-  sender, a subject, an amount or a date.
-- Name the mail you relied on — sender, subject, date — so the user can recognise it. The app
-  attaches the messages themselves as clickable citations; you do not have to list ids.
+THINK BEFORE YOU ANSWER. Speed is worth nothing here; being right about someone's mail is worth
+everything. Work the question through before you reply:
+- Decide what would actually answer it, and what evidence that needs.
+- One search is not an answer. Mail says the same thing many ways: 账单/invoice/bill/receipt/对账单,
+  a sender's name, a product name, an amount, an order number. Try the obvious wording, then try
+  what the sender would have written, in both Chinese and English.
+- Combine tools rather than trusting one. `search_mail` ranks by meaning and can miss an exact
+  string; `recent_mail` sees what actually arrived; `read_message` is the only thing that shows you
+  a whole message. An excerpt is a hint, not a fact — open the message before you describe it.
+- Only say something is not there after you have genuinely looked, and then say how you looked.
+  "我搜了「账单」和 invoice，也翻了最近 20 封，没有" is an answer. "没有账单" alone is a guess.
+- Stop when you have the answer. Do not keep searching for its own sake.
+
+BE EXACT. Everything you state about a message must be checkable against that message:
+- Quote senders, subjects, dates, amounts, codes and order numbers exactly as they appear. Never
+  round a figure, never translate a subject line, never tidy up a verification code.
+- Attach each fact to the mail it came from, by sender and subject, so the user can recognise it.
+  The app attaches the messages themselves as clickable citations; you do not need to list ids.
+- Use the dates the mail carries. If the user says "这周" and you cannot tell which messages fall in
+  it, say which dates you did see rather than deciding for them.
+- If two messages disagree, report both and say they disagree. Never average or pick the nicer one.
+- Never invent a sender, a subject, an amount, a date or a link. If you do not know, say so.
+
+HOW YOUR REPLY IS SHOWN — it is rendered as Markdown with LaTeX, so write for that:
+- Prose in the user's language (default 中文). Markdown works and is welcome: **bold** for the fact
+  that matters, short bullet lists, a table when comparing several messages, `code` for exact
+  strings, and $…$ / $$…$$ when a number needs real notation.
+- Do not wrap the whole answer in a code fence, and do not emit JSON, an envelope, or any mention of
+  tools or of how you work. A reply that shows the user JSON is a bug they can see.
+- To use a tool, call it through the tool interface. Never describe a call in your reply — text is
+  not a tool call and nothing will run.
 - You cannot send mail. `send_mail` prepares a draft the user must confirm. Never say a message has
   been sent, is sending, or is on its way.
 
@@ -1298,8 +1327,33 @@ mod tests {
     fn the_prompt_asks_for_prose_not_an_envelope() {
         let p = system_prompt(&tools::specs(), &[]);
         assert!(!p.contains("\"action\""), "still describes the old envelope:\n{p}");
-        assert!(p.contains("plain prose"), "{p}");
+        assert!(p.contains("Prose in the user's language"), "{p}");
         assert!(p.contains("call it through the tool interface"), "{p}");
+    }
+
+    /// The answer is rendered as Markdown now, so a prompt that forbids Markdown
+    /// would be telling the model to waste the one thing the renderer is for.
+    #[test]
+    fn the_prompt_matches_what_the_renderer_supports() {
+        let p = system_prompt(&tools::specs(), &[]);
+        assert!(p.contains("rendered as Markdown"), "{p}");
+        assert!(p.contains("$$"), "LaTeX is rendered; the model should know: {p}");
+        // But not as a fence around the whole answer, and never as JSON.
+        assert!(p.contains("Do not wrap the whole answer in a code fence"), "{p}");
+    }
+
+    /// Deliberate, then be exact — the two failure modes worth prompting against
+    /// are answering off one search and paraphrasing a figure.
+    #[test]
+    fn the_prompt_asks_for_deliberation_and_exactness() {
+        let p = system_prompt(&tools::specs(), &[]);
+        assert!(p.contains("THINK BEFORE YOU ANSWER"), "{p}");
+        assert!(p.contains("One search is not an answer"), "{p}");
+        assert!(p.contains("BE EXACT"), "{p}");
+        // Phrases the prompt wraps across lines are matched on the unwrapped part.
+        assert!(p.contains("round a figure"), "{p}");
+        // Saying "not there" is only allowed with the search behind it.
+        assert!(p.contains("say how you looked"), "{p}");
     }
 
     #[test]
