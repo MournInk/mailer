@@ -27,7 +27,7 @@
 ## 开发
 
 ```bash
-# 依赖：Rust 1.85+、Node 20+，Linux 桌面需 webkit2gtk-4.1 / gtk3 开发库
+# 依赖：Rust 1.85+、Node 24+，Linux 桌面需 webkit2gtk-4.1 / gtk3 开发库
 npm install
 
 # 桌面端开发
