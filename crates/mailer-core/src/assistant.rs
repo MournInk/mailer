@@ -90,6 +90,24 @@ pub async fn ask(
     conversation_id: &str,
     user_text: &str,
 ) -> Result<AssistantReply> {
+    ask_streaming(store, http, conversation_id, user_text, &|_| {}).await
+}
+
+/// [`ask`], with the answer handed over as it is written.
+///
+/// `on_text` receives fragments of prose in order, which is what lets the panel
+/// show an answer being composed instead of a spinner. The reply it returns is
+/// the same one either way, and is still the authoritative version: a round that
+/// streams text and then decides to call a tool will have streamed something that
+/// is not the answer, so the caller replaces rather than appends when this
+/// resolves.
+pub async fn ask_streaming(
+    store: &Arc<Store>,
+    http: &reqwest::Client,
+    conversation_id: &str,
+    user_text: &str,
+    on_text: TextSink<'_>,
+) -> Result<AssistantReply> {
     let question = user_text.trim();
     if question.is_empty() {
         return Err(Error::Other("消息内容不能为空".into()));
@@ -121,7 +139,7 @@ pub async fn ask(
     let system = system_prompt(&offered, &memories);
     let turn = Turn { question, history, context: render_context(&retrieved) };
     let rounds = LiveRounds { http, settings: &ctx.ai };
-    let out = run_loop(&ctx, &rounds, &system, &compose_opening(&turn), &offered).await?;
+    let out = run_loop(&ctx, &rounds, &system, &compose_opening(&turn), &offered, on_text).await?;
     // Counts only: what was asked and what came back is the user's business.
     tracing::debug!(
         "assistant: answered in {} round(s) with {} tool call(s)",
@@ -247,15 +265,22 @@ struct LoopOutput {
 /// answers or asks for tools, whose results go back as first-class turns. The
 /// old design asked for a JSON envelope inside the prose and re-parsed it,
 /// which weaker models mangled often enough that tools never fired.
+/// Somewhere for prose to go as it arrives, before the round is finished.
+///
+/// `&dyn` rather than a generic so the loop stays object-safe, and a no-op
+/// closure is what a caller passes when nobody is watching.
+pub type TextSink<'a> = &'a (dyn Fn(&str) + Send + Sync);
+
 /// One model round. The seam exists so the loop can be tested without a
 /// network: everything provider-specific already lives behind
-/// `ai::chat_with_tools`.
+/// `ai::stream_with_tools`.
 trait Rounds: Send + Sync {
     fn round<'a>(
         &'a self,
         system: &'a str,
         turns: &'a [WireTurn],
         tools: &'a [ToolDef],
+        on_text: TextSink<'a>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<AiCompletion>> + Send + 'a>>;
 }
 
@@ -270,14 +295,19 @@ impl Rounds for LiveRounds<'_> {
         system: &'a str,
         turns: &'a [WireTurn],
         tools: &'a [ToolDef],
+        on_text: TextSink<'a>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<AiCompletion>> + Send + 'a>> {
-        Box::pin(ai::chat_with_tools(
+        // Always streamed, even when nobody is listening: it is the same request
+        // either way, and one path cannot drift from the other if there is only
+        // one. A round that answers all at once simply arrives in one fragment.
+        Box::pin(ai::stream_with_tools(
             self.http,
             self.settings,
             system,
             turns,
             tools,
             MAX_REPLY_TOKENS,
+            on_text,
         ))
     }
 }
@@ -310,6 +340,7 @@ async fn run_loop(
     system: &str,
     question: &str,
     specs: &[ToolDef],
+    on_text: TextSink<'_>,
 ) -> Result<LoopOutput> {
     let mut transcript: Vec<WireTurn> = vec![WireTurn::User(question.to_string())];
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
@@ -328,7 +359,7 @@ async fn run_loop(
         // protocol says "answer now" — asking again would only burn another
         // billable round trip on a call we would refuse to run.
         let offered: &[ToolDef] = if last { &[] } else { specs };
-        let completion = rounds.round(system, &transcript, offered).await?;
+        let completion = rounds.round(system, &transcript, offered, on_text).await?;
 
         // Keep the first round's thinking: it explains the plan the rest of
         // the loop carries out.
@@ -958,6 +989,7 @@ mod tests {
             _system: &'a str,
             turns: &'a [WireTurn],
             tools: &'a [ToolDef],
+            _on_text: TextSink<'a>,
         ) -> Pin<Box<dyn std::future::Future<Output = Result<AiCompletion>> + Send + 'a>> {
             let n = {
                 let mut seen = self.seen.lock().unwrap();
@@ -1180,7 +1212,7 @@ mod tests {
         let script = Scripted::new(&[
             r#"{"action":"final","reply":"没有待处理的账单。","citations":["m1"]}"#,
         ]);
-        let out = run_loop(&ctx, &script, "sys", "有账单吗", &tool_defs(&[])).await.unwrap();
+        let out = run_loop(&ctx, &script, "sys", "有账单吗", &tool_defs(&[]), &|_| {}).await.unwrap();
 
         assert_eq!(out.reply, "没有待处理的账单。");
         assert_eq!(out.cited, vec!["m1".to_string()]);
@@ -1194,7 +1226,7 @@ mod tests {
             "list_accounts|{}",
             "你有 1 个账户。",
         ]);
-        let out = run_loop(&ctx, &script, "sys", "我有几个账户？", &tool_defs(&[])).await.unwrap();
+        let out = run_loop(&ctx, &script, "sys", "我有几个账户？", &tool_defs(&[]), &|_| {}).await.unwrap();
 
         assert_eq!(out.reply, "你有 1 个账户。");
         assert_eq!(out.iterations, 2);
@@ -1214,7 +1246,7 @@ mod tests {
     async fn the_iteration_cap_holds_against_a_model_that_never_stops() {
         let ctx = ctx();
         let script = Scripted::new(&["list_accounts|{}"]);
-        let out = run_loop(&ctx, &script, "sys", "在吗", &tool_defs(&[])).await.unwrap();
+        let out = run_loop(&ctx, &script, "sys", "在吗", &tool_defs(&[]), &|_| {}).await.unwrap();
 
         // Exactly the budget: one model call per round, no more.
         assert_eq!(script.calls(), MAX_TOOL_ITERATIONS);
@@ -1234,7 +1266,7 @@ mod tests {
             draft,
             "草稿已准备好，确认后我才会发送。",
         ]);
-        let out = run_loop(&ctx, &script, "sys", "给老王发封邮件", &tool_defs(&[])).await.unwrap();
+        let out = run_loop(&ctx, &script, "sys", "给老王发封邮件", &tool_defs(&[]), &|_| {}).await.unwrap();
 
         let pending = out.pending.expect("待确认动作");
         assert_eq!(pending.kind, "send_mail");
@@ -1251,7 +1283,7 @@ mod tests {
         let draft = r#"{"action":"tool","tool":"send_mail","arguments":
             {"account_id":"acc1","to":["wang@example.com"],"subject":"你好","body":"下午三点见。"}}"#;
         let script = Scripted::new(&[draft, draft, "好的。"]);
-        let out = run_loop(&ctx, &script, "sys", "再发一封", &tool_defs(&[])).await.unwrap();
+        let out = run_loop(&ctx, &script, "sys", "再发一封", &tool_defs(&[]), &|_| {}).await.unwrap();
 
         assert_eq!(out.tool_calls.len(), 2);
         assert!(out.tool_calls[0].ok);
@@ -1266,7 +1298,7 @@ mod tests {
             "read_message|{\"message_id\":\"ghost\"}",
             "没有找到那封邮件。",
         ]);
-        let out = run_loop(&ctx, &script, "sys", "看看 ghost", &tool_defs(&[])).await.unwrap();
+        let out = run_loop(&ctx, &script, "sys", "看看 ghost", &tool_defs(&[]), &|_| {}).await.unwrap();
 
         assert!(!out.tool_calls[0].ok);
         assert!(out.tool_calls[0].summary.starts_with("失败"));

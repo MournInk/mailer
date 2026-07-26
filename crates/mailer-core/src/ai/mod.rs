@@ -187,6 +187,138 @@ pub async fn chat_with_tools(
     calling::parse_completion(settings.provider, &text)
 }
 
+/// [`chat_with_tools`], streamed.
+///
+/// `on_text` is called with each fragment of prose as it arrives, in order. It
+/// returns the same [`calling::Completion`] the buffered path does, so the loop
+/// around it does not know or care which one ran — the only difference the caller
+/// sees is that the answer showed up while it was being written.
+///
+/// A stream that ends without the provider's own end-of-response marker is a
+/// dropped connection. Whatever text arrived is kept and returned: half an answer
+/// the user already read is worth more than an error that replaces it.
+pub async fn stream_with_tools(
+    http: &reqwest::Client,
+    settings: &AiSettings,
+    system: &str,
+    turns: &[calling::Turn],
+    tools: &[calling::ToolDef],
+    max_tokens: u32,
+    on_text: &(dyn Fn(&str) + Send + Sync),
+) -> Result<calling::Completion> {
+    validate(settings).map_err(Error::InvalidConfig)?;
+
+    let w = wire(settings.provider);
+    let model = settings.model.trim();
+    let mut body = calling::build_body(
+        settings.provider,
+        model,
+        system,
+        turns,
+        tools,
+        settings.temperature,
+        max_tokens,
+    );
+    let url = calling::make_streaming(
+        settings.provider,
+        &mut body,
+        &w.endpoint(settings.api_base.trim(), model),
+    );
+
+    let resp = w
+        .authorize(http.post(&url), settings.api_key.trim())
+        .header("Accept", "text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Ai(format!("请求 {} 失败: {}", redact_url(&url), e.without_url())))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        // The error body is JSON, not a stream; read it whole to say why.
+        let text = resp.text().await.unwrap_or_default();
+        return Err(Error::Ai(format!(
+            "AI 接口返回 {}: {}",
+            status.as_u16(),
+            snippet(&scrub_key(&text, settings.api_key.trim()))
+        )));
+    }
+
+    let mut state = calling::StreamState::new(settings.provider);
+    let mut stream = resp.bytes_stream();
+    // Events arrive split across TCP reads at arbitrary points, so bytes are
+    // buffered until a blank line proves one event is complete.
+    let mut buffer = String::new();
+
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk
+            .map_err(|e| Error::Ai(format!("AI 流式响应中断: {}", e.without_url())))?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some(cut) = next_event(&buffer) {
+            let event: String = buffer.drain(..cut).collect();
+            for payload in sse_data(&event) {
+                let delta = state.feed(&payload);
+                if !delta.is_empty() {
+                    on_text(&delta);
+                }
+            }
+        }
+        if state.finished() {
+            break;
+        }
+    }
+    // Whatever was left without a trailing blank line.
+    for payload in sse_data(&buffer) {
+        let delta = state.feed(&payload);
+        if !delta.is_empty() {
+            on_text(&delta);
+        }
+    }
+
+    let finished = state.finished();
+    let completion = state.finish();
+    if !finished && completion.text.is_empty() && completion.calls.is_empty() {
+        return Err(Error::Ai("AI 流式响应在返回任何内容前断开".to_string()));
+    }
+    Ok(completion)
+}
+
+/// Byte offset just past the first complete SSE event in `buffer`, if there is
+/// one. Events are separated by a blank line, in either line ending.
+fn next_event(buffer: &str) -> Option<usize> {
+    let lf = buffer.find("\n\n").map(|i| i + 2);
+    let crlf = buffer.find("\r\n\r\n").map(|i| i + 4);
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The `data:` payloads of one event, joined per the SSE specification.
+fn sse_data(event: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for raw in event.lines() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        match line.strip_prefix("data:") {
+            Some(rest) => {
+                if !current.is_empty() {
+                    current.push('\n');
+                }
+                current.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+            // `event:`, `id:`, `:` keep-alives — nothing a client needs here.
+            None => {}
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Provider abstraction
 // ---------------------------------------------------------------------------

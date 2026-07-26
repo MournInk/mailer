@@ -13,6 +13,7 @@ import type {
   AiSettingsInput,
   AiSettingsPublic,
   AlertEvent,
+  AssistantDelta,
   AssistantReply,
   CategoryCount,
   ChatTurn,
@@ -200,4 +201,18 @@ export function onSyncStatus(cb: (s: SyncStatus) => void): Promise<UnlistenFn> {
 /** Progress of the embedding backfill, pushed after every batch. */
 export function onIndexStatus(cb: (s: IndexStatus) => void): Promise<UnlistenFn> {
   return listen<IndexStatus>("mailer://index-status", (ev) => cb(ev.payload));
+}
+
+/**
+ * Fragments of an assistant answer, in order, as the model writes them.
+ *
+ * Tagged with the conversation, because a panel that has been reset must not
+ * append text belonging to the question it stopped waiting for. What arrives here
+ * is provisional: a round that streams prose and then calls a tool has streamed
+ * something that is not the answer, so `assistantAsk`'s reply replaces it.
+ */
+export function onAssistantDelta(
+  cb: (d: AssistantDelta) => void,
+): Promise<UnlistenFn> {
+  return listen<AssistantDelta>("mailer://assistant-delta", (ev) => cb(ev.payload));
 }

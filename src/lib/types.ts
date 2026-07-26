@@ -272,6 +272,12 @@ export interface TrackerStats {
   messages: number;
 }
 
+/** One fragment of an answer being written. */
+export interface AssistantDelta {
+  conversationId: string;
+  text: string;
+}
+
 export interface PrivacySettings {
   /** refuse remote content until asked, per message. Default true. */
   blockTrackers: boolean;

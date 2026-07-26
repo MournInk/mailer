@@ -43,15 +43,43 @@ export function Assistant() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<PendingAction | null>(null);
+  /** The answer as it is being written, before the finished turn arrives. */
+  const [draft, setDraft] = useState("");
+
+  // The conversation this panel is currently waiting on. A ref because the
+  // listener is registered once and must see the current value, not the one
+  // captured when it was set up.
+  const askingRef = useRef<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Follow the conversation as it grows.
+  // Follow the conversation as it grows — including while an answer is being
+  // written, which is the whole point of streaming it.
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [turns, busy, pending]);
+  }, [turns, busy, pending, draft]);
+
+  // Fragments of the answer, pushed from the backend as the model writes them.
+  // Registered once for the life of the panel; `askingRef` decides what to keep.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void api
+      .onAssistantDelta((d) => {
+        // A new conversation's id is minted by the backend, so the first answer
+        // of a thread arrives tagged with an id this panel has not seen yet.
+        // Anything while we are waiting is ours; anything else is not.
+        if (askingRef.current === null) return;
+        if (askingRef.current !== "" && d.conversationId !== askingRef.current) return;
+        setDraft((t) => t + d.text);
+      })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => unlisten?.();
+  }, []);
 
   useEffect(() => {
     if (assistantOpen) inputRef.current?.focus();
@@ -87,9 +115,13 @@ export function Assistant() {
       setTurns((t) => [...t, optimistic]);
       setInput("");
       setBusy(true);
+      setDraft("");
+      askingRef.current = conversationId ?? "";
       try {
         const reply = await api.assistantAsk(conversationId, question);
         setConversationId(reply.turn.conversationId);
+        // Replace rather than keep: the streamed text may include prose from a
+        // round that then called a tool, and the stored turn is the answer.
         setTurns((t) => [...t, reply.turn]);
         setPending(reply.pendingConfirmation ?? null);
       } catch (e) {
@@ -98,6 +130,8 @@ export function Assistant() {
         setInput(question);
         pushToast("error", `助手出错: ${e}`);
       } finally {
+        askingRef.current = null;
+        setDraft("");
         setBusy(false);
       }
     },
@@ -188,10 +222,20 @@ export function Assistant() {
           turns.map((t) => <Turn key={t.id} turn={t} onOpen={select} />)
         )}
 
+        {/* The answer as it is written. Rendered as plain text with a cursor
+            rather than as Markdown: half a fence or half a table is not valid
+            Markdown, and re-parsing it on every fragment would make the panel
+            flicker between interpretations. The finished turn is rendered. */}
+        {busy && draft && (
+          <div className="asst-turn">
+            <div className="asst-stream">{draft}</div>
+          </div>
+        )}
+
         {busy && (
           <p className="asst-thinking">
             <Icon name="loader" size={14} className="asst-spin" />
-            正在查阅邮件…
+            {draft ? "正在作答…" : "正在查阅邮件…"}
           </p>
         )}
 

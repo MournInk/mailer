@@ -28,6 +28,8 @@ const MAX_CONVERSATIONS: u32 = 500;
 const MAX_PENDING: usize = 32;
 /// Progress of the embedding backfill, pushed as it runs.
 const INDEX_EVENT: &str = "mailer://index-status";
+/// Fragments of an assistant answer, pushed as the model writes them.
+const ASSISTANT_DELTA_EVENT: &str = "mailer://assistant-delta";
 
 /// Which OS the shell is running on, so the frontend knows whether to draw its
 /// own window controls. Windows and Linux run undecorated and get ours; macOS
@@ -1162,12 +1164,21 @@ impl PendingActions {
     }
 }
 
+/// One fragment of an answer being written.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantDelta {
+    pub conversation_id: String,
+    pub text: String,
+}
+
 /// Ask the assistant one question.
 ///
 /// `conversation_id` of `None` starts a new conversation; the id it was given is
 /// on the returned turn, so the caller can keep asking into the same thread.
 #[tauri::command]
 pub async fn assistant_ask(
+    app: AppHandle,
     state: State<'_, AppState>,
     conversation_id: Option<String>,
     text: String,
@@ -1179,9 +1190,23 @@ pub async fn assistant_ask(
         .filter(|id| !id.is_empty())
         .unwrap_or_else(new_id);
 
-    let reply = assistant::ask(engine.store(), engine.http(), &conversation_id, &text)
-        .await
-        .map_err(err_str)?;
+    // Each fragment of prose, as the model writes it. Tagged with the
+    // conversation so a panel that has moved on ignores what it did not ask for.
+    let sink = {
+        let app = app.clone();
+        let id = conversation_id.clone();
+        move |chunk: &str| {
+            let _ = app.emit(
+                ASSISTANT_DELTA_EVENT,
+                AssistantDelta { conversation_id: id.clone(), text: chunk.to_string() },
+            );
+        }
+    };
+
+    let reply =
+        assistant::ask_streaming(engine.store(), engine.http(), &conversation_id, &text, &sink)
+            .await
+            .map_err(err_str)?;
     // The action is only ever executed from here, against this snapshot — the
     // model cannot hand `confirm_pending_action` an id it made up later.
     if let Some(action) = &reply.pending_confirmation {
