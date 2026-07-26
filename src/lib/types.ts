@@ -124,6 +124,8 @@ export interface EmailMessage {
   fromName: string;
   fromAddr: string;
   toAddrs: string[];
+  /** Cc header — needed to answer a thread without dropping anyone */
+  ccAddrs: string[];
   date: number;
   snippet: string;
   bodyText: string | null;
@@ -320,6 +322,18 @@ export interface PrivacySettings {
   blockTrackers: boolean;
 }
 
+export interface DraftPrefill {
+  accountId: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+  inReplyTo: string | null;
+}
+
+/** Which composer a message action opens. */
+export type DraftKind = "reply" | "reply_all" | "forward";
+
 export interface ReadingSettings {
   /** show a reply chain as one row instead of one per message. Default true. */
   groupThreads: boolean;
@@ -378,6 +392,10 @@ export interface CategoryCount {
 export interface OutgoingMail {
   accountId: string;
   to: string[];
+  /** visible copies — everyone on the thread sees these */
+  cc: string[];
+  /** blind copies — delivered via the envelope, never written as a header */
+  bcc: string[];
   subject: string;
   body: string;
   inReplyTo?: string | null;

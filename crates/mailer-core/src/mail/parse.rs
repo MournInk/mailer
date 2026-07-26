@@ -226,7 +226,7 @@ fn head(s: &str, max_bytes: usize) -> &str {
 /// Crude HTML → text for previews: drop markup, decode the entities that
 /// actually show up in mail. Good enough for a 140-char snippet, and it never
 /// allocates more than the source.
-fn html_to_text(html: &str) -> String {
+pub fn html_to_text(html: &str) -> String {
     decode_entities(&strip_tags(html))
 }
 

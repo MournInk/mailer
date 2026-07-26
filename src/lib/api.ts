@@ -36,6 +36,8 @@ import type {
   MessageQuery,
   NotifyChannel,
   OutgoingMail,
+  DraftKind,
+  DraftPrefill,
   PrivacySettings,
   ReadingSettings,
   RerankerSettingsInput,
@@ -146,6 +148,12 @@ export const setReadingSettings = (input: ReadingSettings) =>
 /** Every message in one conversation, oldest first. */
 export const threadMessages = (threadId: string) =>
   invoke<EmailMessage[]>("thread_messages", { threadId });
+/**
+ * What replying to (or forwarding) a message should put in the composer.
+ * The recipient set is computed in Rust — see `mailer_core::reply`.
+ */
+export const prepareDraft = (id: string, kind: DraftKind, when: string) =>
+  invoke<DraftPrefill>("prepare_draft", { id, kind, when });
 /** Mark a whole conversation read; returns how many messages changed. */
 export const markThreadRead = (threadId: string, read: boolean) =>
   invoke<number>("mark_thread_read", { threadId, read });

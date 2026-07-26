@@ -20,6 +20,7 @@ import {
   CATEGORY_LABEL,
   TRACKER_KIND_LABEL,
   type AttachmentMeta,
+  type DraftKind,
   type EmailMessage,
   type TrackerHit,
 } from "../lib/types";
@@ -179,7 +180,7 @@ export function MessageView() {
 }
 
 function MessageDetail({ msg }: { msg: EmailMessage }) {
-  const { select, toggleStar, remove, openCompose, pushToast, blockTrackers } = useApp();
+  const { select, toggleStar, remove, composeFrom, pushToast, blockTrackers } = useApp();
 
   // With blocking off, remote content loads with the message. The state is keyed
   // on the setting so flipping the switch takes effect on the open mail rather
@@ -210,6 +211,10 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
   }, [msg.id]);
 
   const subject = msg.subject || "(无主题)";
+  // Whether reply-all would reach anyone the plain reply would not. Counting
+  // recipients is enough: a mail addressed only to this user has exactly one,
+  // and the backend drops the user's own addresses either way.
+  const othersOnThread = msg.toAddrs.length + msg.ccAddrs.length > 1;
   const analysis = msg.analysis;
   /** Monogram for the letterhead — same convention as the sidebar accounts. */
   const monogram = (msg.fromName || msg.fromAddr).trim().charAt(0) || "?";
@@ -220,14 +225,18 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
   );
 
   // -- actions ---------------------------------------------------------------
-  const reply = useCallback(() => {
-    openCompose({
-      accountId: msg.accountId,
-      to: msg.fromAddr,
-      subject: subject.startsWith("Re:") ? subject : `Re: ${subject}`,
-      inReplyTo: msg.id,
-    });
-  }, [openCompose, msg.accountId, msg.fromAddr, msg.id, subject]);
+  /**
+   * Open the composer for a reply, a reply-all or a forward.
+   *
+   * Delegated to the store so the keyboard shortcuts and these buttons go
+   * through one path. The recipient set is computed in Rust, not here: getting
+   * it wrong is silent — the mail sends, it looks right, and the people who
+   * were dropped simply never hear back. See `mailer_core::reply`.
+   */
+  const compose = useCallback(
+    (kind: DraftKind) => composeFrom(msg.id, kind),
+    [composeFrom, msg.id],
+  );
 
   const reclassify = useCallback(async () => {
     if (reclassifying) return;
@@ -286,11 +295,34 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
           <button
             className="btn btn-ghost btn-sm mv-act"
-            onClick={reply}
+            onClick={() => void compose("reply")}
             title="回复发件人"
           >
             <Icon name="reply" size={15} />
             <span className="mv-bar-text">回复</span>
+          </button>
+
+          {/* Only when there is somebody else to include. On a one-to-one mail
+              reply-all is the same mail, and a button that does what the one
+              beside it does is a button you have to think about. */}
+          {othersOnThread && (
+            <button
+              className="btn btn-ghost btn-sm mv-act"
+              onClick={() => void compose("reply_all")}
+              title="回复所有人"
+            >
+              <Icon name="reply-all" size={15} />
+              <span className="mv-bar-text">回复全部</span>
+            </button>
+          )}
+
+          <button
+            className="btn btn-ghost btn-sm mv-act"
+            onClick={() => void compose("forward")}
+            title="转发这封邮件"
+          >
+            <Icon name="forward" size={15} />
+            <span className="mv-bar-text">转发</span>
           </button>
 
           <button
@@ -369,6 +401,16 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
                   )}
                 </div>
               ))}
+
+            {/* Who else can see this. Shown because reply-all will write to
+                them, and a recipient list you cannot check is one you cannot
+                correct before sending. */}
+            {msg.ccAddrs.length > 0 && (
+              <p className="mv-to">
+                <span className="mv-to-label">抄送</span>
+                <span className="mv-addr">{msg.ccAddrs.join("、")}</span>
+              </p>
+            )}
           </header>
 
           {/* -- AI panel: the signature element of the app ------------------ */}

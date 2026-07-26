@@ -22,6 +22,7 @@ import type {
   EmailMessage,
   LabelCount,
   MailLabel,
+  DraftKind,
   MessagePage,
   SyncStatus,
 } from "./types";
@@ -56,6 +57,10 @@ export interface Toast {
 export interface ComposeState {
   accountId: string;
   to: string;
+  /** Visible copies. Everyone on the thread sees these. */
+  cc: string;
+  /** Blind copies — never written into a header, see `smtp::send`. */
+  bcc: string;
   subject: string;
   body: string;
   inReplyTo: string | null;
@@ -131,6 +136,11 @@ interface AppStore {
   dismissAlert: (messageId: string) => void;
   openAlertMessage: (a: AlertEvent) => Promise<void>;
   openCompose: (init?: Partial<ComposeState>) => void;
+  /**
+   * Open the composer for a reply / reply-all / forward of one message.
+   * The recipient set comes from the backend — see `mailer_core::reply`.
+   */
+  composeFrom: (id: string, kind: DraftKind) => Promise<void>;
   closeCompose: () => void;
   setAssistantOpen: (open: boolean) => void;
   setPaletteOpen: (open: boolean) => void;
@@ -499,6 +509,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setCompose({
         accountId: init?.accountId ?? first.id,
         to: init?.to ?? "",
+        cc: init?.cc ?? "",
+        bcc: init?.bcc ?? "",
         subject: init?.subject ?? "",
         body: init?.body ?? "",
         inReplyTo: init?.inReplyTo ?? null,
@@ -506,6 +518,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     },
     [accounts, pushToast],
   );
+  const composeFrom = useCallback(
+    async (id: string, kind: DraftKind) => {
+      try {
+        const msg = await api.getMessage(id);
+        const d = await api.prepareDraft(id, kind, formatFullDate(msg.date));
+        openCompose({
+          accountId: d.accountId,
+          to: d.to.join(", "),
+          cc: d.cc.join(", "),
+          subject: d.subject,
+          body: d.body,
+          inReplyTo: d.inReplyTo,
+        });
+      } catch (e) {
+        pushToast("error", `无法打开撰写窗口: ${e}`);
+      }
+    },
+    [openCompose, pushToast],
+  );
+
   const closeCompose = useCallback(() => setCompose(null), []);
 
   // -- backend events -------------------------------------------------------
@@ -615,6 +647,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dismissAlert,
       openAlertMessage,
       openCompose,
+      composeFrom,
       closeCompose,
       assistantOpen,
       paletteOpen,
@@ -629,7 +662,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       labels, labelCounts, refreshLabels,
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
       markReadAction, remove, sync, openSettings, closeSettings, setTheme, setGroupThreads,
-      pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, closeCompose,
+      pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, composeFrom, closeCompose,
       assistantOpen, paletteOpen, shortcutsOpen,
     ],
   );

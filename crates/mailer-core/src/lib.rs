@@ -21,6 +21,7 @@ pub mod memory;
 pub mod net;
 pub mod notify;
 pub mod rag;
+pub mod reply;
 pub mod store;
 pub mod sync;
 pub mod thread;

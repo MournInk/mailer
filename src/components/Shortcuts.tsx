@@ -38,7 +38,9 @@ const SHEET: Array<{ group: string; rows: Array<[string, string]> }> = [
     rows: [
       ["C", "写邮件"],
       ["/", "搜索"],
-      ["R", "回复当前邮件"],
+      ["R", "回复发件人"],
+      ["A", "回复所有人"],
+      ["F", "转发"],
       ["S", "加/取消星标"],
       ["#", "删除当前邮件（同时删除服务器）"],
       ["U", "返回列表"],
@@ -183,18 +185,29 @@ export function ShortcutListener() {
             void app.toggleStar(app.selectedId, !app.selected?.starred);
           }
           break;
+        // r / a / f all open the composer the same way the reading pane does:
+        // through `prepare_draft`, so the recipient set is computed once, in
+        // the one place that is tested. Assembling it here as well is how the
+        // two drift apart.
         case "r":
         case "R":
           if (app.selected) {
             e.preventDefault();
-            app.openCompose({
-              accountId: app.selected.accountId,
-              to: app.selected.fromAddr,
-              subject: app.selected.subject.startsWith("Re:")
-                ? app.selected.subject
-                : `Re: ${app.selected.subject}`,
-              inReplyTo: app.selected.id,
-            });
+            void app.composeFrom(app.selected.id, "reply");
+          }
+          break;
+        case "a":
+        case "A":
+          if (app.selected) {
+            e.preventDefault();
+            void app.composeFrom(app.selected.id, "reply_all");
+          }
+          break;
+        case "f":
+        case "F":
+          if (app.selected) {
+            e.preventDefault();
+            void app.composeFrom(app.selected.id, "forward");
           }
           break;
         case "#":

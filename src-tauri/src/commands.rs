@@ -708,6 +708,69 @@ pub fn set_reading_settings(
     Ok(input)
 }
 
+/// How the compose window should be opened for a reply or a forward.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftPrefill {
+    pub account_id: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub body: String,
+    pub in_reply_to: Option<String>,
+}
+
+/// What replying to (or forwarding) one message should put in the composer.
+///
+/// Built here rather than in the window because the recipient set is the part
+/// that can be silently wrong — see `mailer_core::reply`. `kind` is one of
+/// `reply`, `reply_all`, `forward`.
+#[tauri::command]
+pub fn prepare_draft(
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    when: String,
+) -> CmdResult<DraftPrefill> {
+    let store = state.engine.store();
+    let msg = store.get_message(&id).map_err(err_str)?;
+
+    // Every address this user owns, across all accounts — a reply must not go
+    // to another of their own mailboxes either.
+    let mine: Vec<String> = store
+        .list_accounts()
+        .map_err(err_str)?
+        .into_iter()
+        .flat_map(|a| [a.email, a.username])
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    let forwarding = kind == "forward";
+    let recipients = if forwarding {
+        mailer_core::reply::Recipients::default()
+    } else {
+        mailer_core::reply::reply_recipients(&msg, &mine, kind == "reply_all")
+    };
+
+    Ok(DraftPrefill {
+        account_id: msg.account_id.clone(),
+        to: recipients.to,
+        cc: recipients.cc,
+        subject: if forwarding {
+            mailer_core::reply::forward_subject(&msg.subject)
+        } else {
+            mailer_core::reply::reply_subject(&msg.subject)
+        },
+        body: if forwarding {
+            mailer_core::reply::forward_body(&msg, &when)
+        } else {
+            mailer_core::reply::reply_body(&msg, &when)
+        },
+        // A forward starts a new conversation; a reply continues one.
+        in_reply_to: (!forwarding).then(|| msg.id.clone()),
+    })
+}
+
 /// Mark a whole conversation read — what opening a collapsed row means.
 #[tauri::command]
 pub fn mark_thread_read(

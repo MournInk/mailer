@@ -195,6 +195,21 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
     </>
   ),
+  /* Two arrowheads over one shaft: the reply glyph, said twice. */
+  "reply-all": (
+    <>
+      <path d="m7 17-5-5 5-5" />
+      <path d="m12 17-5-5 5-5" />
+      <path d="M22 18v-2a4 4 0 0 0-4-4H7" />
+    </>
+  ),
+  /* The reply glyph mirrored — the same motion, pointing away. */
+  forward: (
+    <>
+      <path d="m15 17 5-5-5-5" />
+      <path d="M4 18v-2a4 4 0 0 1 4-4h12" />
+    </>
+  ),
   code: (
     <>
       <rect x="3" y="5" width="18" height="14" rx="2" />

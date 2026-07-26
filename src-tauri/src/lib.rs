@@ -148,6 +148,7 @@ pub fn run() {
             commands::set_reading_settings,
             commands::thread_messages,
             commands::mark_thread_read,
+            commands::prepare_draft,
             commands::message_trackers,
             commands::tracker_stats,
             commands::get_mcp_servers,
