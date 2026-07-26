@@ -679,6 +679,10 @@ pub struct ChatTurn {
     pub conversation_id: String,
     pub role: ChatRole,
     pub content: String,
+    /// The model's chain of thought, when it emitted one. Shown collapsed:
+    /// useful for judging an answer, not something to read every time.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Tool invocations this turn made, for the UI to show its work.
     #[serde(default)]
     pub tool_calls: Vec<ToolCallRecord>,

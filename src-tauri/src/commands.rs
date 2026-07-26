@@ -883,6 +883,7 @@ fn record_sent(engine: &SyncEngine, conversation_id: &str, mail: &OutgoingMail) 
         &mail.subject
     };
     let turn = ChatTurn {
+        reasoning: None,
         id: new_id(),
         conversation_id: conversation_id.to_string(),
         role: ChatRole::Tool,

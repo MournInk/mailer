@@ -64,6 +64,7 @@ export function Assistant() {
         content: question,
         toolCalls: [],
         citations: [],
+        reasoning: null,
         createdAt: Date.now(),
       };
       setTurns((t) => [...t, optimistic]);
@@ -219,6 +220,8 @@ function Turn({ turn, onOpen }: { turn: ChatTurn; onOpen: (id: string) => void }
 
   return (
     <div className="asst-turn asst-turn-assistant">
+      {turn.reasoning && <Reasoning text={turn.reasoning} />}
+
       {turn.toolCalls.length > 0 && (
         <ul className="asst-tools" aria-label="助手执行的操作">
           {turn.toolCalls.map((c, i) => (
@@ -234,6 +237,24 @@ function Turn({ turn, onOpen }: { turn: ChatTurn; onOpen: (id: string) => void }
       <div className="asst-answer">{turn.content}</div>
 
       {turn.citations.length > 0 && <Citations hits={turn.citations} onOpen={onOpen} />}
+    </div>
+  );
+}
+
+/**
+ * The model's chain of thought, collapsed by default. Worth keeping — it is how
+ * you tell a reasoned answer from a guessed one — but not worth reading every
+ * time, so it stays out of the way until asked for.
+ */
+function Reasoning({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`asst-think${open ? " open" : ""}`}>
+      <button className="asst-think-toggle" onClick={() => setOpen(!open)}>
+        <Icon name={open ? "chevron-down" : "chevron-right"} size={13} />
+        <span>思考过程</span>
+      </button>
+      {open && <pre className="asst-think-body">{text}</pre>}
     </div>
   );
 }

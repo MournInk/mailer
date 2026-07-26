@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     role            TEXT NOT NULL,
     content         TEXT NOT NULL,
     tool_calls_json TEXT NOT NULL DEFAULT '[]',
+    reasoning       TEXT,
     citations_json  TEXT NOT NULL DEFAULT '[]',
     created_at      INTEGER NOT NULL
 );
@@ -143,6 +144,8 @@ const MIGRATIONS: &[&str] = &[
     // it is 0, triage runs in import mode: no popups for a backlog the user
     // has already dealt with elsewhere.
     "ALTER TABLE accounts ADD COLUMN initial_import_done INTEGER NOT NULL DEFAULT 0",
+    // Reasoning models emit a chain of thought worth keeping with the answer.
+    "ALTER TABLE chat_turns ADD COLUMN reasoning TEXT",
 ];
 
 impl Store {
@@ -790,8 +793,8 @@ impl Store {
         self.with(|c| {
             c.execute(
                 "INSERT INTO chat_turns
-                 (id, conversation_id, role, content, tool_calls_json, citations_json, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                 (id, conversation_id, role, content, tool_calls_json, citations_json, created_at, reasoning)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
                     t.id,
                     t.conversation_id,
@@ -800,6 +803,7 @@ impl Store {
                     serde_json::to_string(&t.tool_calls)?,
                     serde_json::to_string(&t.citations)?,
                     t.created_at,
+                    t.reasoning,
                 ],
             )?;
             c.execute(
@@ -813,7 +817,7 @@ impl Store {
     pub fn conversation_turns(&self, conversation_id: &str) -> Result<Vec<ChatTurn>> {
         self.with(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, conversation_id, role, content, tool_calls_json, citations_json, created_at
+                "SELECT id, conversation_id, role, content, tool_calls_json, citations_json, created_at, reasoning
                  FROM chat_turns WHERE conversation_id=?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map(params![conversation_id], |r| {
@@ -828,6 +832,7 @@ impl Store {
                     tool_calls: serde_json::from_str(&tools).unwrap_or_default(),
                     citations: serde_json::from_str(&cites).unwrap_or_default(),
                     created_at: r.get(6)?,
+                    reasoning: r.get(7)?,
                 })
             })?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

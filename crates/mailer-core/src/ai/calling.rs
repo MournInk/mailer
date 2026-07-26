@@ -1,0 +1,532 @@
+//! Native tool calling, per provider.
+//!
+//! The assistant used to ask the model to print a JSON action envelope and
+//! parsed it out of the prose. Strong models cope; weaker ones — the local
+//! 7B models this app is meant to run against — mangle the format often
+//! enough that tools simply never fire, which is what a "dumb" assistant
+//! looks like from the outside.
+//!
+//! Every provider here has a real tool protocol, so use it: the model emits a
+//! structured call the server validated against our schema, and multi-turn
+//! works because the transcript carries tool results as first-class turns
+//! rather than as more prose to re-parse.
+
+use serde_json::{json, Value};
+
+use crate::error::{Error, Result};
+use crate::types::AiProvider;
+
+/// A tool as the model sees it. Mirrors `tools::ToolSpec`, but owned, because
+/// MCP servers contribute tools discovered at run time.
+#[derive(Debug, Clone)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: Value,
+}
+
+/// One call the model asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolInvocation {
+    /// Provider-assigned id, echoed back with the result so the model can pair
+    /// them. Gemini has no ids, so one is synthesised from the name.
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// One entry in the transcript sent back to the model.
+#[derive(Debug, Clone)]
+pub enum Turn {
+    User(String),
+    /// What the model said last round, including any calls it made.
+    Assistant {
+        text: String,
+        calls: Vec<ToolInvocation>,
+    },
+    /// The outcome of one call, paired by `id`.
+    ToolResult {
+        id: String,
+        name: String,
+        content: String,
+    },
+}
+
+/// What one round produced.
+#[derive(Debug, Clone, Default)]
+pub struct Completion {
+    pub text: String,
+    /// Chain of thought, when the model emitted one.
+    pub reasoning: Option<String>,
+    pub calls: Vec<ToolInvocation>,
+}
+
+impl Completion {
+    pub fn wants_tools(&self) -> bool {
+        !self.calls.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request bodies
+// ---------------------------------------------------------------------------
+
+/// Render the whole request for `provider`.
+pub fn build_body(
+    provider: AiProvider,
+    model: &str,
+    system: &str,
+    turns: &[Turn],
+    tools: &[ToolDef],
+    temperature: f32,
+    max_tokens: u32,
+) -> Value {
+    match provider {
+        AiProvider::OpenaiCompatible | AiProvider::OpenaiResponses => {
+            openai_body(model, system, turns, tools, temperature, max_tokens)
+        }
+        AiProvider::Anthropic => anthropic_body(model, system, turns, tools, temperature, max_tokens),
+        AiProvider::Gemini => gemini_body(system, turns, tools, temperature, max_tokens),
+    }
+}
+
+fn openai_body(
+    model: &str,
+    system: &str,
+    turns: &[Turn],
+    tools: &[ToolDef],
+    temperature: f32,
+    max_tokens: u32,
+) -> Value {
+    let mut messages = vec![json!({ "role": "system", "content": system })];
+    for t in turns {
+        match t {
+            Turn::User(text) => messages.push(json!({ "role": "user", "content": text })),
+            Turn::Assistant { text, calls } => {
+                let mut m = json!({ "role": "assistant" });
+                // An assistant turn with calls may legitimately have no text.
+                m["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+                if !calls.is_empty() {
+                    m["tool_calls"] = Value::Array(
+                        calls
+                            .iter()
+                            .map(|c| {
+                                json!({
+                                    "id": c.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": c.name,
+                                        // Arguments travel as a JSON *string*.
+                                        "arguments": c.arguments.to_string(),
+                                    }
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                messages.push(m);
+            }
+            Turn::ToolResult { id, name, content } => messages.push(json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "name": name,
+                "content": content,
+            })),
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+fn anthropic_body(
+    model: &str,
+    system: &str,
+    turns: &[Turn],
+    tools: &[ToolDef],
+    temperature: f32,
+    max_tokens: u32,
+) -> Value {
+    let mut messages: Vec<Value> = Vec::new();
+    for t in turns {
+        match t {
+            Turn::User(text) => messages.push(json!({ "role": "user", "content": text })),
+            Turn::Assistant { text, calls } => {
+                let mut content: Vec<Value> = Vec::new();
+                if !text.is_empty() {
+                    content.push(json!({ "type": "text", "text": text }));
+                }
+                for c in calls {
+                    content.push(json!({
+                        "type": "tool_use",
+                        "id": c.id,
+                        "name": c.name,
+                        "input": c.arguments,
+                    }));
+                }
+                messages.push(json!({ "role": "assistant", "content": content }));
+            }
+            // Anthropic carries results as a *user* turn holding tool_result
+            // blocks; there is no tool role.
+            Turn::ToolResult { id, content, .. } => messages.push(json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": content,
+                }],
+            })),
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "system": system,
+        "max_tokens": max_tokens,
+        "temperature": temperature.min(1.0),
+        "messages": messages,
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    })
+                })
+                .collect(),
+        );
+    }
+    body
+}
+
+fn gemini_body(
+    system: &str,
+    turns: &[Turn],
+    tools: &[ToolDef],
+    temperature: f32,
+    max_tokens: u32,
+) -> Value {
+    let mut contents: Vec<Value> = Vec::new();
+    for t in turns {
+        match t {
+            Turn::User(text) => {
+                contents.push(json!({ "role": "user", "parts": [{ "text": text }] }))
+            }
+            Turn::Assistant { text, calls } => {
+                let mut parts: Vec<Value> = Vec::new();
+                if !text.is_empty() {
+                    parts.push(json!({ "text": text }));
+                }
+                for c in calls {
+                    parts.push(json!({
+                        "functionCall": { "name": c.name, "args": c.arguments }
+                    }));
+                }
+                contents.push(json!({ "role": "model", "parts": parts }));
+            }
+            Turn::ToolResult { name, content, .. } => contents.push(json!({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": name,
+                        // Gemini wants an object, not a bare string.
+                        "response": { "result": content }
+                    }
+                }],
+            })),
+        }
+    }
+
+    let mut body = json!({
+        "systemInstruction": { "parts": [{ "text": system }] },
+        "contents": contents,
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        },
+    });
+    if !tools.is_empty() {
+        body["tools"] = json!([{
+            "functionDeclarations": tools.iter().map(|t| json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            })).collect::<Vec<_>>()
+        }]);
+    }
+    body
+}
+
+// ---------------------------------------------------------------------------
+// Response parsing
+// ---------------------------------------------------------------------------
+
+/// Pull text, reasoning and tool calls out of one 2xx response body.
+pub fn parse_completion(provider: AiProvider, raw: &str) -> Result<Completion> {
+    let v: Value = serde_json::from_str(raw)
+        .map_err(|e| Error::Ai(format!("AI 响应不是合法 JSON ({e})")))?;
+    let mut c = match provider {
+        AiProvider::OpenaiCompatible | AiProvider::OpenaiResponses => parse_openai(&v),
+        AiProvider::Anthropic => parse_anthropic(&v),
+        AiProvider::Gemini => parse_gemini(&v),
+    };
+
+    // Reasoning models put the chain of thought in the text; separate it so it
+    // can be shown as thinking rather than read as the answer.
+    let (reasoning, text) = super::split_reasoning(&c.text);
+    c.reasoning = c.reasoning.or(reasoning);
+    c.text = text;
+
+    if c.text.is_empty() && c.calls.is_empty() && c.reasoning.is_none() {
+        return Err(Error::Ai("AI 未返回任何内容".to_string()));
+    }
+    Ok(c)
+}
+
+fn parse_openai(v: &Value) -> Completion {
+    let msg = &v["choices"][0]["message"];
+    let calls = msg["tool_calls"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let name = c["function"]["name"].as_str()?.to_string();
+                    // Arguments arrive as a JSON string; a model that emits
+                    // broken JSON there should not kill the whole reply, so an
+                    // unparseable payload becomes an empty object and the tool
+                    // reports the missing field itself.
+                    let raw = c["function"]["arguments"].as_str().unwrap_or("{}");
+                    Some(ToolInvocation {
+                        id: c["id"].as_str().unwrap_or(&name).to_string(),
+                        name,
+                        arguments: serde_json::from_str(raw).unwrap_or_else(|_| json!({})),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Completion {
+        // Some gateways expose a separate reasoning field rather than a tag.
+        reasoning: msg["reasoning_content"]
+            .as_str()
+            .or_else(|| msg["reasoning"].as_str())
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty()),
+        text: msg["content"].as_str().unwrap_or_default().to_string(),
+        calls,
+    }
+}
+
+fn parse_anthropic(v: &Value) -> Completion {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut calls = Vec::new();
+
+    for block in v["content"].as_array().into_iter().flatten() {
+        match block["type"].as_str() {
+            Some("text") => text.push_str(block["text"].as_str().unwrap_or_default()),
+            Some("thinking") => {
+                reasoning.push_str(block["thinking"].as_str().unwrap_or_default())
+            }
+            Some("tool_use") => calls.push(ToolInvocation {
+                id: block["id"].as_str().unwrap_or_default().to_string(),
+                name: block["name"].as_str().unwrap_or_default().to_string(),
+                arguments: block["input"].clone(),
+            }),
+            _ => {}
+        }
+    }
+
+    Completion {
+        text,
+        reasoning: (!reasoning.trim().is_empty()).then_some(reasoning),
+        calls,
+    }
+}
+
+fn parse_gemini(v: &Value) -> Completion {
+    let mut text = String::new();
+    let mut calls = Vec::new();
+
+    for part in v["candidates"][0]["content"]["parts"].as_array().into_iter().flatten() {
+        if let Some(t) = part["text"].as_str() {
+            text.push_str(t);
+        }
+        if let Some(call) = part.get("functionCall") {
+            let name = call["name"].as_str().unwrap_or_default().to_string();
+            calls.push(ToolInvocation {
+                // Gemini assigns no id; pairing is by name, so synthesise one
+                // that stays stable within the round.
+                id: format!("gemini-{name}-{}", calls.len()),
+                name,
+                arguments: call["args"].clone(),
+            });
+        }
+    }
+
+    Completion { text, reasoning: None, calls }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool() -> ToolDef {
+        ToolDef {
+            name: "search_mail".into(),
+            description: "Search mail".into(),
+            parameters: json!({"type":"object","properties":{"query":{"type":"string"}}}),
+        }
+    }
+
+    #[test]
+    fn openai_renders_tools_and_a_tool_result_turn() {
+        let turns = vec![
+            Turn::User("找账单".into()),
+            Turn::Assistant {
+                text: String::new(),
+                calls: vec![ToolInvocation {
+                    id: "call_1".into(),
+                    name: "search_mail".into(),
+                    arguments: json!({"query": "账单"}),
+                }],
+            },
+            Turn::ToolResult {
+                id: "call_1".into(),
+                name: "search_mail".into(),
+                content: "[]".into(),
+            },
+        ];
+        let b = openai_body("gpt-4o-mini", "sys", &turns, &[tool()], 0.2, 900);
+        assert_eq!(b["tools"][0]["function"]["name"], "search_mail");
+        assert_eq!(b["tool_choice"], "auto");
+        // Arguments must be a string, not an object — a common mistake that
+        // 400s the request.
+        assert!(b["messages"][2]["tool_calls"][0]["function"]["arguments"].is_string());
+        assert_eq!(b["messages"][3]["role"], "tool");
+        assert_eq!(b["messages"][3]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn anthropic_carries_results_as_a_user_turn() {
+        let turns = vec![Turn::ToolResult {
+            id: "tu_1".into(),
+            name: "search_mail".into(),
+            content: "ok".into(),
+        }];
+        let b = anthropic_body("claude", "sys", &turns, &[tool()], 0.2, 900);
+        // There is no tool role in this API; results ride inside a user turn.
+        assert_eq!(b["messages"][0]["role"], "user");
+        assert_eq!(b["messages"][0]["content"][0]["type"], "tool_result");
+        assert_eq!(b["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(b["system"], "sys");
+    }
+
+    /// Anthropic rejects temperature above 1.0 outright.
+    #[test]
+    fn anthropic_temperature_is_clamped() {
+        let b = anthropic_body("claude", "s", &[], &[], 1.8, 100);
+        assert_eq!(b["temperature"], 1.0);
+    }
+
+    #[test]
+    fn gemini_wraps_a_result_in_an_object() {
+        let turns = vec![Turn::ToolResult {
+            id: "x".into(),
+            name: "search_mail".into(),
+            content: "found".into(),
+        }];
+        let b = gemini_body("sys", &turns, &[tool()], 0.2, 900);
+        let resp = &b["contents"][0]["parts"][0]["functionResponse"]["response"];
+        assert_eq!(resp["result"], "found");
+        assert_eq!(b["tools"][0]["functionDeclarations"][0]["name"], "search_mail");
+    }
+
+    #[test]
+    fn openai_tool_calls_are_parsed() {
+        let raw = r#"{"choices":[{"message":{"content":null,"tool_calls":[
+            {"id":"c1","type":"function","function":{"name":"search_mail","arguments":"{\"query\":\"账单\"}"}}]}}]}"#;
+        let c = parse_completion(AiProvider::OpenaiCompatible, raw).unwrap();
+        assert_eq!(c.calls.len(), 1);
+        assert_eq!(c.calls[0].arguments["query"], "账单");
+        assert!(c.wants_tools());
+    }
+
+    /// A model that writes broken JSON into `arguments` must not take the whole
+    /// reply down with it.
+    #[test]
+    fn unparseable_arguments_degrade_to_an_empty_object() {
+        let raw = r#"{"choices":[{"message":{"content":"","tool_calls":[
+            {"id":"c1","function":{"name":"search_mail","arguments":"{oops"}}]}}]}"#;
+        let c = parse_completion(AiProvider::OpenaiCompatible, raw).unwrap();
+        assert_eq!(c.calls[0].arguments, json!({}));
+    }
+
+    #[test]
+    fn anthropic_tool_use_and_thinking_are_parsed() {
+        let raw = r#"{"content":[
+            {"type":"thinking","thinking":"先搜索"},
+            {"type":"text","text":"好的"},
+            {"type":"tool_use","id":"tu_1","name":"search_mail","input":{"query":"a"}}]}"#;
+        let c = parse_completion(AiProvider::Anthropic, raw).unwrap();
+        assert_eq!(c.reasoning.unwrap(), "先搜索");
+        assert_eq!(c.text, "好的");
+        assert_eq!(c.calls[0].name, "search_mail");
+    }
+
+    #[test]
+    fn gemini_function_calls_are_parsed() {
+        let raw = r#"{"candidates":[{"content":{"parts":[
+            {"text":"查一下"},{"functionCall":{"name":"search_mail","args":{"query":"b"}}}]}}]}"#;
+        let c = parse_completion(AiProvider::Gemini, raw).unwrap();
+        assert_eq!(c.text, "查一下");
+        assert_eq!(c.calls[0].arguments["query"], "b");
+    }
+
+    /// A reasoning model's inline tag is separated even when tools are in play.
+    #[test]
+    fn inline_reasoning_is_split_out_of_a_tool_round() {
+        let raw = r#"{"choices":[{"message":{"content":"<think>要先搜索</think>好的"}}]}"#;
+        let c = parse_completion(AiProvider::OpenaiCompatible, raw).unwrap();
+        assert_eq!(c.reasoning.unwrap(), "要先搜索");
+        assert_eq!(c.text, "好的");
+    }
+
+    /// Some gateways surface reasoning as its own field instead of a tag.
+    #[test]
+    fn a_separate_reasoning_field_is_picked_up() {
+        let raw = r#"{"choices":[{"message":{"content":"答案","reasoning_content":"推理过程"}}]}"#;
+        let c = parse_completion(AiProvider::OpenaiCompatible, raw).unwrap();
+        assert_eq!(c.reasoning.unwrap(), "推理过程");
+        assert_eq!(c.text, "答案");
+    }
+}

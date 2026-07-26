@@ -19,6 +19,7 @@
 //! Providers live one per file; [`Wire`] is the whole abstraction between them:
 //! a URL, an auth header, a request body, and how to dig the text back out.
 
+pub mod calling;
 mod anthropic;
 mod gemini;
 mod openai_compat;
@@ -131,6 +132,59 @@ pub async fn chat_json(
     max_tokens: u32,
 ) -> Result<String> {
     chat(http, settings, system, user, max_tokens, true).await
+}
+
+/// One round of a tool-capable conversation.
+///
+/// Unlike [`chat_raw`], this carries the whole transcript and the tool list, so
+/// the model can ask for a tool, see its result, and continue — which is what
+/// makes multi-turn work at all.
+pub async fn chat_with_tools(
+    http: &reqwest::Client,
+    settings: &AiSettings,
+    system: &str,
+    turns: &[calling::Turn],
+    tools: &[calling::ToolDef],
+    max_tokens: u32,
+) -> Result<calling::Completion> {
+    validate(settings).map_err(Error::InvalidConfig)?;
+
+    let w = wire(settings.provider);
+    let model = settings.model.trim();
+    let url = w.endpoint(settings.api_base.trim(), model);
+    let body = calling::build_body(
+        settings.provider,
+        model,
+        system,
+        turns,
+        tools,
+        settings.temperature,
+        max_tokens,
+    );
+
+    let resp = w
+        .authorize(http.post(&url), settings.api_key.trim())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| Error::Ai(format!("请求 {} 失败: {}", redact_url(&url), e.without_url())))?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| Error::Ai(format!("读取 AI 响应失败: {}", e.without_url())))?;
+    let text = scrub_key(&text, settings.api_key.trim());
+
+    if !status.is_success() {
+        return Err(Error::Ai(format!(
+            "AI 接口返回 {}: {}",
+            status.as_u16(),
+            snippet(&text)
+        )));
+    }
+
+    calling::parse_completion(settings.provider, &text)
 }
 
 // ---------------------------------------------------------------------------

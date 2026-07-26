@@ -386,3 +386,36 @@
     width: 46px;
   }
 }
+
+/* -- reasoning ------------------------------------------------------------- */
+
+.asst-think {
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+}
+
+.asst-think-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.asst-think-toggle:hover {
+  color: var(--ink-2);
+}
+
+.asst-think-body {
+  margin: 6px 0 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--ink-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  user-select: text;
+}

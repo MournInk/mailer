@@ -301,6 +301,8 @@ export interface ChatTurn {
   conversationId: string;
   role: ChatRole;
   content: string;
+  /** the model's chain of thought, shown collapsed */
+  reasoning?: string | null;
   toolCalls: ToolCallRecord[];
   citations: SearchHit[];
   createdAt: number;
