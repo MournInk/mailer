@@ -1320,6 +1320,7 @@ mod tests {
 
     fn msg(id: &str, subject: &str, body: Option<&str>, html: Option<&str>) -> EmailMessage {
         EmailMessage {
+            cc_addrs: Vec::new(),
             references: Vec::new(),
             thread_id: String::new(),
             id: id.into(),

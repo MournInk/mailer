@@ -199,6 +199,10 @@ pub struct EmailMessage {
     pub from_name: String,
     pub from_addr: String,
     pub to_addrs: Vec<String>,
+    /// Cc header. Needed to answer a group thread without dropping people —
+    /// which is why it is parsed and stored rather than discarded.
+    #[serde(default)]
+    pub cc_addrs: Vec<String>,
     /// Date header as unix milliseconds.
     pub date: i64,
     /// Plain-text preview (~140 chars).
@@ -490,6 +494,12 @@ pub struct TestResult {
 pub struct OutgoingMail {
     pub account_id: String,
     pub to: Vec<String>,
+    /// Visible copies. Everyone on the thread sees these.
+    #[serde(default)]
+    pub cc: Vec<String>,
+    /// Blind copies. Never written into a header — see `smtp::send`.
+    #[serde(default)]
+    pub bcc: Vec<String>,
     pub subject: String,
     pub body: String,
     /// Message id being replied to, if any (sets In-Reply-To).

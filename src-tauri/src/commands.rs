@@ -445,6 +445,8 @@ async fn send_outgoing(engine: &SyncEngine, mail: &OutgoingMail) -> CmdResult<()
     smtp::send(
         &account,
         &mail.to,
+        &mail.cc,
+        &mail.bcc,
         &mail.subject,
         &mail.body,
         in_reply_to.as_deref(),

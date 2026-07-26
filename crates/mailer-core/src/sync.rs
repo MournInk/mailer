@@ -738,6 +738,7 @@ mod tests {
         for i in 0..count {
             store
                 .insert_message(&EmailMessage {
+                    cc_addrs: Vec::new(),
                     references: Vec::new(),
                     thread_id: String::new(),
                     id: format!("m{}", i + 1),

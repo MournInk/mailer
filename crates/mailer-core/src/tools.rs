@@ -527,6 +527,10 @@ fn send_mail(ctx: &ToolContext, args: &Value) -> Result<Value> {
     let mail = OutgoingMail {
         account_id: account.id.clone(),
         to,
+        // The assistant addresses the people it was asked to. Letting a model
+        // add copies is a way for one to reach someone the user never named.
+        cc: Vec::new(),
+        bcc: Vec::new(),
         subject,
         body,
         in_reply_to: opt_str(args, "in_reply_to"),
@@ -925,6 +929,7 @@ mod tests {
 
     fn message(id: &str, subject: &str) -> EmailMessage {
         EmailMessage {
+            cc_addrs: Vec::new(),
             references: Vec::new(),
             thread_id: String::new(),
             id: id.into(),

@@ -969,6 +969,7 @@ mod tests {
 
     fn msg_with(body_text: Option<&str>, body_html: Option<&str>) -> EmailMessage {
         EmailMessage {
+            cc_addrs: Vec::new(),
             references: Vec::new(),
             thread_id: String::new(),
             id: "m1".into(),

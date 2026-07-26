@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS messages (
     from_name    TEXT NOT NULL DEFAULT '',
     from_addr    TEXT NOT NULL DEFAULT '',
     to_json      TEXT NOT NULL DEFAULT '[]',
+    cc_json      TEXT NOT NULL DEFAULT '[]',
     date         INTEGER NOT NULL,
     snippet      TEXT NOT NULL DEFAULT '',
     body_text    TEXT,
@@ -168,10 +169,9 @@ CREATE TABLE IF NOT EXISTS memories (
     last_used_at  INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_memories_live
-    ON memories(status, kind, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_memories_norm
-    ON memories(norm_text);
+-- The indexes over `memories` are in MIGRATIONS, not here, for the same reason
+-- as the ones over `messages`: on an upgraded database the CREATE TABLE above
+-- is a no-op, so `status` and `norm_text` do not exist until the ALTERs run.
 
 CREATE TABLE IF NOT EXISTS memory_vectors (
     memory_id  TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -301,12 +301,20 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE memories ADD COLUMN norm_text TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE memories ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE memories ADD COLUMN last_used_at INTEGER",
+    // After the columns above exist — see the note where the table is defined.
+    "CREATE INDEX IF NOT EXISTS idx_memories_live
+       ON memories(status, kind, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_norm ON memories(norm_text)",
     // Threading. Existing rows land with an empty `thread_id`, which
     // `backfill_threads` fills in — until then they read as their own thread,
     // which is exactly how an unthreaded mailbox already behaved.
     "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE messages ADD COLUMN refs_json TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE messages ADD COLUMN subject_norm TEXT NOT NULL DEFAULT ''",
+    // Cc was parsed away before reply-all existed, so old rows have none.
+    // They reply-all to whoever is still on the To line, which is the best
+    // that can be done without the original headers.
+    "ALTER TABLE messages ADD COLUMN cc_json TEXT NOT NULL DEFAULT '[]'",
     // Threading reads two ways: "every message in this conversation" when the
     // reading pane opens one, and "the newest per conversation" for every list
     // page. Both are this index.
@@ -480,8 +488,8 @@ impl Store {
                 "INSERT OR IGNORE INTO messages
                  (id,account_id,folder,uid,message_id,subject,from_name,from_addr,to_json,date,
                   snippet,body_text,body_html,atts_json,unread,starred,deleted,category,analysis_json,received_at,
-                  thread_id,refs_json,subject_norm)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19,?20,?21,?22)",
+                  thread_id,refs_json,subject_norm,cc_json)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19,?20,?21,?22,?23)",
                 params![
                     m.id,
                     m.account_id,
@@ -505,6 +513,7 @@ impl Store {
                     thread_id,
                     serde_json::to_string(&m.references)?,
                     subject.norm,
+                    serde_json::to_string(&m.cc_addrs)?,
                 ],
             )?;
             if n > 0 {
@@ -2480,6 +2489,11 @@ fn row_to_message(r: &Row<'_>) -> rusqlite::Result<EmailMessage> {
         from_name: r.get("from_name")?,
         from_addr: r.get("from_addr")?,
         to_addrs: serde_json::from_str(&to_json).unwrap_or_default(),
+        cc_addrs: r
+            .get::<_, String>("cc_json")
+            .ok()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
         date: r.get("date")?,
         snippet: r.get("snippet")?,
         body_text: r.get("body_text")?,
@@ -2542,6 +2556,7 @@ mod tests {
 
     fn sample_message(id: &str, uid: &str) -> EmailMessage {
         EmailMessage {
+            cc_addrs: Vec::new(),
             references: Vec::new(),
             thread_id: String::new(),
             id: id.into(),
@@ -2822,6 +2837,100 @@ mod tests {
         assert!(s.reading_settings().unwrap().group_threads);
         s.set_reading_settings(&ReadingSettings { group_threads: false }).unwrap();
         assert!(!s.reading_settings().unwrap().group_threads);
+    }
+
+    /// SCHEMA must never index a column that MIGRATIONS adds.
+    ///
+    /// On a fresh database this is invisible: `CREATE TABLE` builds the table
+    /// complete and the index works. On an upgraded one the `CREATE TABLE IF
+    /// NOT EXISTS` is a no-op, the column does not exist yet, and
+    /// `execute_batch(SCHEMA)` fails — which means `Store::open` fails, which
+    /// means the app shows a window and exits. It shipped exactly once, as
+    /// two indexes over `memories`, and every test passed the whole time
+    /// because tests start from an empty database.
+    ///
+    /// So this checks the rule rather than the instance.
+    #[test]
+    fn schema_never_indexes_a_column_that_a_migration_adds() {
+        let added: Vec<(&str, &str)> = MIGRATIONS
+            .iter()
+            .filter_map(|m| {
+                let rest = m.split("ALTER TABLE ").nth(1)?;
+                let mut words = rest.split_whitespace();
+                let table = words.next()?;
+                let column = rest.split("ADD COLUMN ").nth(1)?.split_whitespace().next()?;
+                Some((table, column))
+            })
+            .collect();
+        assert!(!added.is_empty(), "no ALTERs found — the parser is wrong, not the schema");
+
+        for stmt in SCHEMA.split(';') {
+            let stmt = stmt.trim();
+            if !stmt.to_uppercase().starts_with("CREATE INDEX")
+                && !stmt.to_uppercase().starts_with("CREATE UNIQUE INDEX")
+            {
+                continue;
+            }
+            let Some((_, target)) = stmt.split_once(" ON ") else { continue };
+            let Some((table, cols)) = target.split_once('(') else { continue };
+            let table = table.trim();
+            for (t, c) in &added {
+                if *t != table {
+                    continue;
+                }
+                assert!(
+                    !cols.split(|ch: char| !ch.is_alphanumeric() && ch != '_').any(|w| w == *c),
+                    "SCHEMA indexes {table}.{c}, which MIGRATIONS adds later — move this \
+                     index into MIGRATIONS or every upgrade will fail to open:\n{stmt}"
+                );
+            }
+        }
+    }
+
+    /// The upgrade path itself: a database written by an older build must
+    /// still open. Exercised against a table set deliberately missing every
+    /// migration-added column.
+    #[test]
+    fn a_database_from_an_older_build_still_opens() {
+        let path = std::env::temp_dir().join(format!("mailer-upgrade-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let old = Connection::open(&path).unwrap();
+            // The shapes these tables had before the columns were added.
+            old.execute_batch(
+                "CREATE TABLE accounts (
+                     id TEXT PRIMARY KEY, label TEXT NOT NULL, email TEXT NOT NULL,
+                     protocol TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL,
+                     username TEXT NOT NULL, password TEXT NOT NULL, tls TEXT NOT NULL,
+                     smtp_json TEXT, sync_interval INTEGER NOT NULL DEFAULT 300,
+                     color_hue INTEGER NOT NULL DEFAULT 210, created_at INTEGER NOT NULL);
+                 CREATE TABLE messages (
+                     id TEXT PRIMARY KEY, account_id TEXT NOT NULL, folder TEXT NOT NULL,
+                     uid TEXT NOT NULL, message_id TEXT, subject TEXT NOT NULL DEFAULT '',
+                     from_name TEXT NOT NULL DEFAULT '', from_addr TEXT NOT NULL DEFAULT '',
+                     to_json TEXT NOT NULL DEFAULT '[]', date INTEGER NOT NULL,
+                     snippet TEXT NOT NULL DEFAULT '', body_text TEXT, body_html TEXT,
+                     atts_json TEXT NOT NULL DEFAULT '[]', unread INTEGER NOT NULL DEFAULT 1,
+                     starred INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,
+                     category TEXT, analysis_json TEXT, received_at INTEGER NOT NULL,
+                     UNIQUE(account_id, folder, uid));
+                 CREATE TABLE memories (
+                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL,
+                     source TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                 CREATE TABLE chat_turns (
+                     id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+                     content TEXT NOT NULL, created_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).expect("an older database must still open");
+        // And the migrated columns are usable, not merely present.
+        store.set_reading_settings(&ReadingSettings { group_threads: false }).unwrap();
+        assert!(!store.reading_settings().unwrap().group_threads);
+        assert_eq!(store.unthreaded_count().unwrap(), 0);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -69,6 +69,7 @@ pub fn parse_mail(id: String, account_id: &str, raw: &RawMail, now_ms: i64) -> R
     let subject = parsed.subject().unwrap_or_default().to_string();
     let (from_name, from_addr) = first_addr(parsed.from());
     let to_addrs = addr_list(parsed.to());
+    let cc_addrs = addr_list(parsed.cc());
     let message_id = parsed.message_id().map(str::to_string);
     let references = crate::thread::ancestors(&id_list(parsed.references()), &id_list(parsed.in_reply_to()));
 
@@ -130,6 +131,7 @@ pub fn parse_mail(id: String, account_id: &str, raw: &RawMail, now_ms: i64) -> R
         from_name,
         from_addr,
         to_addrs,
+        cc_addrs,
         date,
         snippet,
         body_text,
