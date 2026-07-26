@@ -20,6 +20,29 @@ const MAX_FETCH: u32 = 50;
 const MAX_CLASSIFY: u32 = 20;
 /// Scheduler tick.
 const TICK: Duration = Duration::from_secs(20);
+/// Ceiling on one fetch round trip. Neither protocol client sets its own —
+/// a server that accepts the connection and then goes silent would otherwise
+/// pin the account's `in_flight` slot forever, and that account would never
+/// sync again. Generous enough for 50 messages over a slow link.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(180);
+/// Ceiling on a server-side delete round trip.
+const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound one protocol round trip. A timeout surfaces as a normal error so the
+/// account's status shows why it stalled instead of sitting silently in sync.
+async fn with_timeout<T>(
+    limit: Duration,
+    what: &str,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<Result<T>> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(v) => Ok(v),
+        Err(_) => Err(Error::Other(format!(
+            "{what}超时（{} 秒内服务器无响应）",
+            limit.as_secs()
+        ))),
+    }
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -189,7 +212,9 @@ impl SyncEngine {
         let raws: Vec<RawMail> = match account.protocol {
             Protocol::Imap => {
                 let expected = self.store.uid_validity(account_id, "INBOX")?;
-                let fetched = imap::fetch_new(&account, &known, MAX_FETCH, expected).await?;
+                let fetched =
+                    with_timeout(FETCH_TIMEOUT, "收信", imap::fetch_new(&account, &known, MAX_FETCH, expected))
+                        .await??;
                 if fetched.uids_reset {
                     // The mailbox was rebuilt server-side: retire the stale UIDs
                     // so future syncs re-diff cleanly. Messages survive, and
@@ -201,7 +226,10 @@ impl SyncEngine {
                     .set_uid_validity(account_id, "INBOX", fetched.uid_validity)?;
                 fetched.mails
             }
-            Protocol::Pop3 => pop3::fetch_new(&account, &known, MAX_FETCH).await?,
+            Protocol::Pop3 => {
+                with_timeout(FETCH_TIMEOUT, "收信", pop3::fetch_new(&account, &known, MAX_FETCH))
+                    .await??
+            }
         };
 
         self.set_status(account_id, |st| st.phase = SyncPhase::Fetching);
@@ -362,8 +390,16 @@ impl SyncEngine {
                     Err(_) => continue,
                 };
                 let res = match account.protocol {
-                    Protocol::Imap => imap::delete(&account, folder, uids).await,
-                    Protocol::Pop3 => pop3::delete(&account, uids).await,
+                    Protocol::Imap => {
+                        with_timeout(DELETE_TIMEOUT, "删除", imap::delete(&account, folder, uids))
+                            .await
+                            .and_then(|r| r)
+                    }
+                    Protocol::Pop3 => {
+                        with_timeout(DELETE_TIMEOUT, "删除", pop3::delete(&account, uids))
+                            .await
+                            .and_then(|r| r)
+                    }
                 };
                 if let Err(e) = res {
                     tracing::warn!("server delete on {account_id} failed (kept local delete): {e}");
@@ -490,6 +526,34 @@ mod tests {
         assert!(store.get_message("m1").is_err());
         assert_eq!(store.query_messages(&MessageQuery::default()).unwrap().total, 0);
         assert_eq!(sink.changed.lock().unwrap().as_slice(), ["acc1"]);
+    }
+
+    /// A server that accepts the connection and then goes silent must not pin
+    /// the sync slot: the wait has to end, and it has to end as an error the
+    /// account status can show.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_server_times_out_instead_of_hanging() {
+        let never = async {
+            // Longer than any real round trip; only the timeout can end this.
+            tokio::time::sleep(Duration::from_secs(86_400)).await;
+            Ok::<(), Error>(())
+        };
+        let outcome = with_timeout(FETCH_TIMEOUT, "收信", never).await;
+        match outcome {
+            Err(Error::Other(msg)) => assert!(msg.contains("超时"), "got {msg}"),
+            other => panic!("expected a timeout error, got {other:?}"),
+        }
+    }
+
+    /// A slow-but-alive server keeps its result — the guard must not truncate
+    /// a transfer that was going to finish.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_but_responsive_server_still_succeeds() {
+        let slow = async {
+            tokio::time::sleep(FETCH_TIMEOUT - Duration::from_secs(1)).await;
+            Ok::<u8, Error>(7)
+        };
+        assert_eq!(with_timeout(FETCH_TIMEOUT, "收信", slow).await.unwrap().unwrap(), 7);
     }
 
     /// Reclassify surfaces a clear configuration error instead of calling out
