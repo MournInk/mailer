@@ -1319,3 +1319,80 @@
     inset: -9px -6px;
   }
 }
+
+/* -- knowledge base -------------------------------------------------------- */
+
+.kb-index {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kb-bar {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.kb-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-slow) var(--ease-out);
+}
+
+.kb-index-text {
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.kb-index-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+.kb-mem-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.kb-mem-kind {
+  width: auto;
+  min-width: 96px;
+  flex-shrink: 0;
+}
+
+.kb-mem-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kb-mem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.kb-mem-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}

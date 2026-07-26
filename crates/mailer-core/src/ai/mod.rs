@@ -237,7 +237,70 @@ async fn chat(
         )));
     }
 
-    w.extract(&text)
+    let content = w.extract(&text)?;
+    // Reasoning models emit their chain of thought inline. Every caller wants
+    // the answer, not the deliberation: classification parses JSON out of this
+    // and would choke on the prose, and a user reading a reply should not have
+    // to scroll past it. The assistant asks for the thinking separately.
+    Ok(split_reasoning(&content).1)
+}
+
+/// Separate a reasoning block from the answer.
+///
+/// Returns `(reasoning, answer)`. Handles the tags reasoning models actually
+/// emit, and the case where generation was cut off before the closing tag —
+/// there the whole remainder is deliberation, and returning it as the answer
+/// would show the user a half-finished thought instead of nothing.
+pub fn split_reasoning(raw: &str) -> (Option<String>, String) {
+    const OPENERS: [(&str, &str); 3] = [
+        ("<think>", "</think>"),
+        ("<thinking>", "</thinking>"),
+        ("<reasoning>", "</reasoning>"),
+    ];
+
+    for (open, close) in OPENERS {
+        let Some(start) = find_ascii_ci(raw, open) else { continue };
+        let after_open = start + open.len();
+        return match find_ascii_ci(&raw[after_open..], close) {
+            Some(rel_end) => {
+                let end = after_open + rel_end;
+                let reasoning = raw[after_open..end].trim().to_string();
+                let mut answer = String::with_capacity(raw.len());
+                answer.push_str(&raw[..start]);
+                answer.push_str(&raw[end + close.len()..]);
+                (non_empty(reasoning), answer.trim().to_string())
+            }
+            // Unclosed: the model ran out of budget mid-thought.
+            None => (
+                non_empty(raw[after_open..].trim().to_string()),
+                raw[..start].trim().to_string(),
+            ),
+        };
+    }
+    (None, raw.trim().to_string())
+}
+
+fn non_empty(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Case-insensitive byte search, so `<THINK>` is found too.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
 }
 
 /// Replace any literal occurrence of the configured key with a marker.
@@ -769,6 +832,51 @@ mod tests {
         let body = "model not found: gpt-4o";
         assert_eq!(scrub_key(body, "gpt"), body);
         assert_eq!(scrub_key(body, ""), body);
+    }
+
+    /// A reasoning model puts its whole chain of thought in the reply. Left in,
+    /// it breaks JSON parsing for classification and buries the answer for the
+    /// user.
+    #[test]
+    fn reasoning_block_is_separated_from_the_answer() {
+        let (think, answer) =
+            split_reasoning("<think>先看发件人，是 GitHub</think>这是一封验证码邮件。");
+        assert_eq!(think.unwrap(), "先看发件人，是 GitHub");
+        assert_eq!(answer, "这是一封验证码邮件。");
+    }
+
+    #[test]
+    fn reasoning_tags_are_matched_case_insensitively() {
+        let (think, answer) = split_reasoning("<THINKING>hmm</THINKING>done");
+        assert_eq!(think.unwrap(), "hmm");
+        assert_eq!(answer, "done");
+    }
+
+    /// Cut off mid-thought: everything after the opener is deliberation, so the
+    /// answer is empty rather than a half-finished thought shown as the reply.
+    #[test]
+    fn an_unclosed_reasoning_block_yields_no_answer() {
+        let (think, answer) = split_reasoning("<think>还在想，预算用完了");
+        assert_eq!(think.unwrap(), "还在想，预算用完了");
+        assert_eq!(answer, "");
+    }
+
+    #[test]
+    fn text_without_reasoning_is_untouched() {
+        let (think, answer) = split_reasoning("  普通回答  ");
+        assert!(think.is_none());
+        assert_eq!(answer, "普通回答");
+    }
+
+    /// Classification asks for JSON; a reasoning model wraps it in a think
+    /// block and the old parser saw prose before the brace.
+    #[test]
+    fn json_survives_a_reasoning_wrapper() {
+        let raw = "<think>looks like spam</think>{\"category\":\"spam\",\"confidence\":0.9,\
+                   \"summary\":\"促销\",\"verificationCode\":null,\"deletable\":true,\"reason\":\"ad\"}";
+        let (_, answer) = split_reasoning(raw);
+        let parsed = parse_analysis(&answer).expect("should parse");
+        assert_eq!(parsed.category, Category::Spam);
     }
 
     #[test]

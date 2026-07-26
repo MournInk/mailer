@@ -13,6 +13,7 @@ import { Icon } from "../Icon";
 import { AboutTab } from "./AboutTab";
 import { AccountsTab } from "./AccountsTab";
 import { AiTab } from "./AiTab";
+import { KnowledgeTab } from "./KnowledgeTab";
 import { ChannelsTab } from "./ChannelsTab";
 import "./Settings.css";
 
@@ -28,6 +29,12 @@ const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }
     label: "AI 过滤器",
     icon: "spark",
     sub: "配置负责分类、摘要与提取验证码的模型",
+  },
+  {
+    key: "knowledge",
+    label: "知识库",
+    icon: "archive",
+    sub: "语义检索的向量与重排模型，以及助手的记忆",
   },
   {
     key: "channels",
@@ -101,6 +108,7 @@ export function SettingsView() {
           <div className="set-col fade-up" key={settingsTab}>
             {settingsTab === "accounts" && <AccountsTab />}
             {settingsTab === "ai" && <AiTab />}
+            {settingsTab === "knowledge" && <KnowledgeTab />}
             {settingsTab === "channels" && <ChannelsTab />}
             {settingsTab === "about" && <AboutTab />}
           </div>
