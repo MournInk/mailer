@@ -738,6 +738,8 @@ mod tests {
         for i in 0..count {
             store
                 .insert_message(&EmailMessage {
+                    references: Vec::new(),
+                    thread_id: String::new(),
                     id: format!("m{}", i + 1),
                     account_id: "acc1".into(),
                     folder: "INBOX".into(),

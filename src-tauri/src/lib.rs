@@ -99,6 +99,10 @@ pub fn run() {
             // Same deal for the tracker report: local, and about mail that
             // arrived before there was anything looking.
             tauri::async_runtime::spawn(commands::backfill_trackers(engine.clone()));
+            // And for conversations: mail stored before threading existed has
+            // no thread of its own, and the list would show it as a flat run of
+            // near-identical rows until this pass has been over it.
+            tauri::async_runtime::spawn(commands::backfill_threads(engine.clone()));
             app.manage(AppState {
                 engine,
                 index: Arc::default(),
@@ -140,6 +144,10 @@ pub fn run() {
             commands::delete_label,
             commands::get_privacy_settings,
             commands::set_privacy_settings,
+            commands::get_reading_settings,
+            commands::set_reading_settings,
+            commands::thread_messages,
+            commands::mark_thread_read,
             commands::message_trackers,
             commands::tracker_stats,
             commands::get_mcp_servers,

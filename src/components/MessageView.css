@@ -767,6 +767,120 @@
   border-top: 1px solid var(--line);
 }
 
+/* -- the rest of the conversation ------------------------------------------
+   Same rule as the attachments below it: a hairline and a label, so the page
+   reads as one document with sections rather than a stack of cards. */
+.mv-thread {
+  margin-top: 32px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.mv-thread-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  color: var(--ink-3);
+}
+.mv-thread-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+.mv-thread-hint {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--ink-4);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mv-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mv-thread-row {
+  border-radius: var(--radius-md);
+}
+.mv-thread-row.open {
+  background: var(--surface-2);
+}
+
+/* One collapsed message. A grid rather than flex so the dates line up down
+   the column — a ragged right edge on a list of times is hard to scan. */
+.mv-thread-line {
+  display: grid;
+  grid-template-columns: 13px minmax(0, max-content) minmax(0, 1fr) max-content;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mv-thread-line:hover {
+  background: var(--surface-2);
+}
+
+.mv-thread-from {
+  overflow: hidden;
+  color: var(--ink-1);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mv-thread-snippet {
+  overflow: hidden;
+  color: var(--ink-4);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mv-thread-date {
+  color: var(--ink-4);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mv-thread-body {
+  padding: 4px 12px 14px;
+}
+/* The body inside a collapsed message is a preview, not the document — it gets
+   the reading pane's typography at a smaller size and no extra chrome. */
+.mv-thread-body .mv-html,
+.mv-thread-body .mv-text {
+  /* The 26px above a body opens the main document under its letterhead.
+     Here the header is one line away, and that much air reads as a gap. */
+  margin-top: 2px;
+  margin-bottom: 12px;
+  font-size: var(--text-sm);
+}
+
+@media (max-width: 900px) {
+  /* The snippet is the first thing to go: sender and time still say which
+     message this is, and a two-character preview says nothing. */
+  .mv-thread-line {
+    grid-template-columns: 13px minmax(0, 1fr) max-content;
+  }
+  .mv-thread-snippet {
+    display: none;
+  }
+}
+
 /* -- attachments ----------------------------------------------------------- */
 
 .mv-atts {

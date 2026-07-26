@@ -18,9 +18,10 @@ import { Section, SwitchField } from "./parts";
 const ROWS = 7;
 
 export function PrivacyTab() {
-  const { pushToast, blockTrackers, setBlockTrackers } = useApp();
+  const { pushToast, blockTrackers, setBlockTrackers, groupThreads, setGroupThreads } = useApp();
   const [stats, setStats] = useState<TrackerStats | null>(null);
   const [busy, setBusy] = useState(false);
+  const [grouping, setGrouping] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -43,6 +44,30 @@ export function PrivacyTab() {
 
   return (
     <>
+      <Section
+        title="会话视图"
+        icon="mail"
+        sub="一来一回是一件事，不是十件。收起来之后，列表里一行就是一场对话。"
+      >
+        <SwitchField
+          label="把往来邮件收成一条会话"
+          hint="默认开启。关掉之后每封邮件各占一行，和以前一样。"
+          checked={groupThreads}
+          onChange={(v) => {
+            setGrouping(true);
+            void setGroupThreads(v).finally(() => setGrouping(false));
+          }}
+          disabled={grouping}
+        />
+        <p className="set-note">
+          <Icon name="spark" size={14} />
+          <span>
+            按邮件里的引用关系归拢；对方的客户端没写引用时，退回到用「回复:」开头的主题来判断，
+            并且只在一个月内匹配——否则两封同名的「发票」会被当成同一场对话。
+          </span>
+        </p>
+      </Section>
+
       <Section
         title="阻止追踪器"
         icon="shield"

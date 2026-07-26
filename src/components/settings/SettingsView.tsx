@@ -47,9 +47,9 @@ const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }
   },
   {
     key: "privacy",
-    label: "隐私",
+    label: "阅读与隐私",
     icon: "shield",
-    sub: "拦截邮件里的追踪器，并看看它们有多频繁",
+    sub: "会话视图，以及拦截邮件里的追踪器",
   },
   {
     key: "channels",

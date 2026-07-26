@@ -92,6 +92,8 @@ interface AppStore {
   theme: ThemePref;
   /** Refuse remote content in mail until asked, per message. Default on. */
   blockTrackers: boolean;
+  /** Show a reply chain as one row. Default on. */
+  groupThreads: boolean;
   alerts: AlertEvent[];
   toasts: Toast[];
   compose: ComposeState | null;
@@ -123,6 +125,7 @@ interface AppStore {
   closeSettings: () => void;
   setTheme: (t: ThemePref) => void;
   setBlockTrackers: (v: boolean) => Promise<void>;
+  setGroupThreads: (v: boolean) => Promise<void>;
   pushToast: (kind: Toast["kind"], text: string) => void;
   dismissToast: (id: number) => void;
   dismissAlert: (messageId: string) => void;
@@ -172,6 +175,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // reading pane has to honour it the moment it changes, and both need one
   // answer to "are we blocking".
   const [blockTrackers, setBlockTrackersState] = useState(true);
+  // Same reasoning for grouping: the list renders a row differently depending
+  // on it, and the backend decides what a page contains from the same stored
+  // value — so this is a mirror of the setting, never a second opinion.
+  const [groupThreads, setGroupThreadsState] = useState(true);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [compose, setCompose] = useState<ComposeState | null>(null);
@@ -183,6 +190,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   filterRef.current = filter;
   const pageRef = useRef(page);
   pageRef.current = page;
+  // `select` is memoised on very little, and re-creating it whenever the
+  // grouping preference changes would re-run every effect that depends on it.
+  const groupThreadsRef = useRef(groupThreads);
+  groupThreadsRef.current = groupThreads;
 
   // -- theme ----------------------------------------------------------------
   // Read the stored preference once. Blocking stays on until told otherwise,
@@ -191,6 +202,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     void api
       .getPrivacySettings()
       .then((p) => setBlockTrackersState(p.blockTrackers))
+      .catch(() => {});
+    void api
+      .getReadingSettings()
+      .then((r) => setGroupThreadsState(r.groupThreads))
       .catch(() => {});
   }, []);
 
@@ -306,8 +321,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const msg = await api.getMessage(id);
         setSelected(msg);
-        if (msg.unread) {
-          await api.markRead([id], true);
+        // Grouped, the row that was clicked stands for the whole conversation,
+        // so opening it has to clear the whole conversation. Marking only this
+        // message would leave the row bold on an unread reply the user cannot
+        // even see from the list.
+        const row = pageRef.current.items.find((m) => m.id === id);
+        const wholeThread = groupThreadsRef.current && !!msg.threadId;
+        if (msg.unread || (wholeThread && row?.unread)) {
+          if (wholeThread) {
+            await api.markThreadRead(msg.threadId, true);
+          } else {
+            await api.markRead([id], true);
+          }
           setPage((p) => ({
             ...p,
             unread: Math.max(0, p.unread - 1),
@@ -435,6 +460,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [pushToast]);
 
+  const setGroupThreads = useCallback(
+    async (v: boolean) => {
+      setGroupThreadsState(v);
+      try {
+        await api.setReadingSettings({ groupThreads: v });
+        // The backend reads the stored value to build a page, so the list has
+        // to be asked again — nothing about the current one is still true.
+        await refreshList();
+      } catch (e) {
+        setGroupThreadsState(!v);
+        pushToast("error", `保存失败: ${e}`);
+      }
+    },
+    [pushToast, refreshList],
+  );
+
   const dismissAlert = useCallback((messageId: string) => {
     setAlerts((a) => a.filter((x) => x.messageId !== messageId));
   }, []);
@@ -550,6 +591,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       settingsTab,
       theme,
       blockTrackers,
+      groupThreads,
       alerts,
       toasts,
       compose,
@@ -567,6 +609,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       closeSettings,
       setTheme,
       setBlockTrackers,
+      setGroupThreads,
       pushToast,
       dismissToast,
       dismissAlert,
@@ -582,10 +625,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
     [
       accounts, counts, syncMap, page, filter, selected, selectedId,
-      loadingList, loadingMore, view, settingsTab, theme, blockTrackers, alerts, toasts, compose,
+      loadingList, loadingMore, view, settingsTab, theme, blockTrackers, groupThreads, alerts, toasts, compose,
       labels, labelCounts, refreshLabels,
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
-      markReadAction, remove, sync, openSettings, closeSettings, setTheme,
+      markReadAction, remove, sync, openSettings, closeSettings, setTheme, setGroupThreads,
       pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, closeCompose,
       assistantOpen, paletteOpen, shortcutsOpen,
     ],

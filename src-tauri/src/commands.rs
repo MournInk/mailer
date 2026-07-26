@@ -235,7 +235,13 @@ fn protocol_label(p: Protocol) -> &'static str {
 
 #[tauri::command]
 pub fn list_messages(state: State<'_, AppState>, query: MessageQuery) -> CmdResult<MessagePage> {
-    state.engine.store().query_messages(&query).map_err(err_str)
+    let store = state.engine.store();
+    // Grouping is the stored preference, not something the caller gets to
+    // decide per request. The window reads the same setting to know how to
+    // render a row, and if the two could disagree the list would show
+    // collapsed counts on rows that are not collapsed.
+    let group_threads = store.reading_settings().map(|s| s.group_threads).unwrap_or(true);
+    store.query_messages(&MessageQuery { group_threads, ..query }).map_err(err_str)
 }
 
 #[tauri::command]
@@ -686,6 +692,36 @@ pub fn set_privacy_settings(
     Ok(input)
 }
 
+#[tauri::command]
+pub fn get_reading_settings(state: State<'_, AppState>) -> CmdResult<ReadingSettings> {
+    state.engine.store().reading_settings().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn set_reading_settings(
+    state: State<'_, AppState>,
+    input: ReadingSettings,
+) -> CmdResult<ReadingSettings> {
+    state.engine.store().set_reading_settings(&input).map_err(err_str)?;
+    Ok(input)
+}
+
+/// Mark a whole conversation read — what opening a collapsed row means.
+#[tauri::command]
+pub fn mark_thread_read(
+    state: State<'_, AppState>,
+    thread_id: String,
+    read: bool,
+) -> CmdResult<u32> {
+    state.engine.store().set_thread_read(&thread_id, read).map_err(err_str)
+}
+
+/// Every message in one conversation, oldest first.
+#[tauri::command]
+pub fn thread_messages(state: State<'_, AppState>, thread_id: String) -> CmdResult<Vec<EmailMessage>> {
+    state.engine.store().thread_messages(&thread_id).map_err(err_str)
+}
+
 /// What one message wanted to load from somebody else's server.
 #[tauri::command]
 pub fn message_trackers(state: State<'_, AppState>, id: String) -> CmdResult<Vec<TrackerHit>> {
@@ -756,6 +792,54 @@ pub async fn backfill_trackers(engine: std::sync::Arc<SyncEngine>) {
             Ok(_) => {}
             Err(_) => return,
         }
+        tokio::task::yield_now().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Threading
+// ---------------------------------------------------------------------------
+
+/// Messages threaded per pass. Each one is a couple of indexed lookups, but the
+/// batch holds the store mutex, so it stays short enough not to be felt.
+const THREAD_BATCH: u32 = 300;
+
+/// Thread whatever arrived before threading existed, then stop.
+///
+/// New mail is threaded on insert, so this only has work to do once — on the
+/// first launch after the upgrade that added the columns. Bounded and measured
+/// like the other backfills: a batch that fails to shrink means something in it
+/// cannot be threaded, and repeating it forever would be worse than stopping.
+pub async fn backfill_threads(engine: std::sync::Arc<SyncEngine>) {
+    let store = engine.store();
+    let mut left = match store.unthreaded_count() {
+        Ok(0) => return,
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("threading: 读取待处理邮件数失败: {e}");
+            return;
+        }
+    };
+    tracing::info!("threading: 正在整理 {left} 封旧邮件的会话");
+    loop {
+        match store.backfill_threads(THREAD_BATCH) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("threading: 整理失败: {e}");
+                return;
+            }
+        }
+        let now = match store.unthreaded_count() {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        if now >= left {
+            tracing::warn!("threading: 还剩 {now} 封无法整理，已停止");
+            return;
+        }
+        left = now;
         tokio::task::yield_now().await;
     }
 }

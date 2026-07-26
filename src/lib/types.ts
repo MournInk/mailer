@@ -116,6 +116,10 @@ export interface EmailMessage {
   folder: string;
   uid: string;
   messageId: string | null;
+  /** every ancestor this message cites, oldest first */
+  references: string[];
+  /** the conversation it belongs to; assigned by the store on insert */
+  threadId: string;
   subject: string;
   fromName: string;
   fromAddr: string;
@@ -147,6 +151,10 @@ export interface MessageHeader {
   category: Category | null;
   verificationCode: string | null;
   summary: string | null;
+  /** the conversation this row stands for */
+  threadId: string;
+  /** messages in that conversation *within the current filter*; 1 when alone */
+  threadCount: number;
 }
 
 export interface MessageQuery {
@@ -310,6 +318,11 @@ export interface AssistantDelta {
 export interface PrivacySettings {
   /** refuse remote content until asked, per message. Default true. */
   blockTrackers: boolean;
+}
+
+export interface ReadingSettings {
+  /** show a reply chain as one row instead of one per message. Default true. */
+  groupThreads: boolean;
 }
 
 export interface NotifyChannel {

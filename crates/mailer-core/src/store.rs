@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::error::{Error, Result};
+use crate::thread;
 use crate::types::*;
 
 pub struct Store {
@@ -55,6 +56,12 @@ CREATE TABLE IF NOT EXISTS messages (
     category     TEXT,
     analysis_json TEXT,
     received_at  INTEGER NOT NULL,
+    -- Threading. `thread_id` is the id of the message that started the
+    -- conversation, so a mail with no replies is its own thread and needs no
+    -- special case anywhere downstream.
+    thread_id    TEXT NOT NULL DEFAULT '',
+    refs_json    TEXT NOT NULL DEFAULT '[]',
+    subject_norm TEXT NOT NULL DEFAULT '',
     UNIQUE(account_id, folder, uid)
 );
 
@@ -64,6 +71,17 @@ CREATE INDEX IF NOT EXISTS idx_messages_category
     ON messages(category, deleted, date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_msgid
     ON messages(account_id, message_id);
+-- The threading indexes over `messages` are in MIGRATIONS, not here: on an
+-- upgraded database the CREATE TABLE above is a no-op, so the columns they
+-- cover do not exist until the ALTERs have run. This table has no such
+-- problem — it is new either way.
+CREATE TABLE IF NOT EXISTS message_refs (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    ref_id     TEXT NOT NULL,
+    PRIMARY KEY (message_id, ref_id)
+);
+-- The reverse lookup: everyone who cites this Message-ID.
+CREATE INDEX IF NOT EXISTS idx_message_refs_ref ON message_refs(ref_id);
 
 CREATE TABLE IF NOT EXISTS channels (
     id          TEXT PRIMARY KEY,
@@ -283,6 +301,20 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE memories ADD COLUMN norm_text TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE memories ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE memories ADD COLUMN last_used_at INTEGER",
+    // Threading. Existing rows land with an empty `thread_id`, which
+    // `backfill_threads` fills in — until then they read as their own thread,
+    // which is exactly how an unthreaded mailbox already behaved.
+    "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE messages ADD COLUMN refs_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE messages ADD COLUMN subject_norm TEXT NOT NULL DEFAULT ''",
+    // Threading reads two ways: "every message in this conversation" when the
+    // reading pane opens one, and "the newest per conversation" for every list
+    // page. Both are this index.
+    "CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, date DESC)",
+    // The subject fallback looks up one normalised subject per arriving
+    // message, scoped to the account and bounded by date.
+    "CREATE INDEX IF NOT EXISTS idx_messages_subject_norm
+       ON messages(account_id, subject_norm, date DESC)",
 ];
 
 impl Store {
@@ -442,11 +474,14 @@ impl Store {
                     return Ok(false);
                 }
             }
+            let subject = thread::normalize_subject(&m.subject);
+            let thread_id = resolve_thread(c, m, &subject)?;
             let n = c.execute(
                 "INSERT OR IGNORE INTO messages
                  (id,account_id,folder,uid,message_id,subject,from_name,from_addr,to_json,date,
-                  snippet,body_text,body_html,atts_json,unread,starred,deleted,category,analysis_json,received_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19)",
+                  snippet,body_text,body_html,atts_json,unread,starred,deleted,category,analysis_json,received_at,
+                  thread_id,refs_json,subject_norm)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,0,?17,?18,?19,?20,?21,?22)",
                 params![
                     m.id,
                     m.account_id,
@@ -467,8 +502,19 @@ impl Store {
                     m.category.map(|c| c.as_str()),
                     m.analysis.as_ref().map(|a| serde_json::to_string(a).unwrap_or_default()),
                     m.received_at,
+                    thread_id,
+                    serde_json::to_string(&m.references)?,
+                    subject.norm,
                 ],
             )?;
+            if n > 0 {
+                index_refs(c, m)?;
+                // A message can name ancestors that arrived after it — IMAP
+                // hands out a folder in UID order, not conversation order.
+                // Adopting those now is what keeps an out-of-order backfill
+                // from leaving a thread split in two.
+                adopt_orphans(c, m, &thread_id)?;
+            }
             if n > 0 {
                 // In the same transaction as the row. As a second call it was one
                 // `if let Err` away from a mailbox whose body text is unsearchable,
@@ -769,6 +815,74 @@ impl Store {
         })
     }
 
+    /// Every message in one conversation, oldest first — the order it was
+    /// read in.
+    ///
+    /// Bodies included: the reading pane shows the whole chain, and fetching
+    /// each message separately would be one IPC round trip per reply.
+    pub fn thread_messages(&self, thread_id: &str) -> Result<Vec<EmailMessage>> {
+        if thread_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT * FROM messages WHERE thread_id=?1 AND deleted=0 ORDER BY date ASC, id ASC",
+            )?;
+            let rows = stmt.query_map(params![thread_id], row_to_message)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Give threads to messages stored before threading existed.
+    ///
+    /// These rows have no `References`: the header was never stored and the
+    /// raw mail is long gone, so the exact rule has nothing to work with and
+    /// the subject fallback carries the whole backfill. That recovers most of
+    /// it — a reply almost always says "Re:" — and it is the only part that is
+    /// lossy. New mail arriving afterwards still links to these by
+    /// `Message-ID`, which *was* stored, so the graph repairs itself forward.
+    ///
+    /// Oldest first, so an ancestor is always in place before the reply that
+    /// cites it. Bounded per call: the first launch after an upgrade should
+    /// not be one multi-minute transaction.
+    pub fn backfill_threads(&self, limit: u32) -> Result<u32> {
+        self.with_tx(|c| {
+            let mut stmt = c.prepare(
+                "SELECT * FROM messages WHERE thread_id='' ORDER BY date ASC, id ASC LIMIT ?1",
+            )?;
+            let batch = stmt
+                .query_map(params![limit], row_to_message)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let mut done = 0;
+            for m in &batch {
+                let subject = thread::normalize_subject(&m.subject);
+                // The row is already in the table, so `resolve_thread` can see
+                // it — and would happily thread it to itself by subject. Its
+                // own empty `thread_id` is excluded from both lookups, which
+                // is the one thing keeping that from happening.
+                let thread_id = resolve_thread(c, m, &subject)?;
+                c.execute(
+                    "UPDATE messages SET thread_id=?1, subject_norm=?2 WHERE id=?3",
+                    params![thread_id, subject.norm, m.id],
+                )?;
+                adopt_orphans(c, m, &thread_id)?;
+                done += 1;
+            }
+            Ok(done)
+        })
+    }
+
+    /// How many messages are still waiting on `backfill_threads`.
+    pub fn unthreaded_count(&self) -> Result<u32> {
+        self.with(|c| {
+            let n: i64 =
+                c.query_row("SELECT COUNT(*) FROM messages WHERE thread_id=''", [], |r| r.get(0))?;
+            Ok(n as u32)
+        })
+    }
+
     /// Known UIDs for one folder — used by sync to fetch only new mail.
     pub fn known_uids(&self, account_id: &str, folder: &str) -> Result<Vec<String>> {
         self.with(|c| {
@@ -900,19 +1014,51 @@ impl Store {
             // Both totals from one scan. As two queries the same rows were
             // visited twice per page — and with a `search` filter that is two
             // full table scans for one keystroke.
-            let (total, unread): (u32, u32) = c.query_row(
-                &format!(
-                    "SELECT COUNT(*), COALESCE(SUM(unread),0) FROM messages WHERE {where_sql}"
-                ),
-                params_ref.as_slice(),
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
+            //
+            // Grouped, the same two numbers are counted over conversations
+            // instead of messages: a thread is one row in the list, and one
+            // unread reply makes the whole thread unread.
+            let count_sql = if q.group_threads {
+                format!(
+                    "SELECT COUNT(*), COALESCE(SUM(u),0) FROM
+                       (SELECT MAX(unread) u FROM messages WHERE {where_sql} GROUP BY thread_id)"
+                )
+            } else {
+                format!("SELECT COUNT(*), COALESCE(SUM(unread),0) FROM messages WHERE {where_sql}")
+            };
+            let (total, unread): (u32, u32) =
+                c.query_row(&count_sql, params_ref.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?;
 
             let limit = if q.limit == 0 { 50 } else { q.limit.min(200) };
+            // The window functions run either way, so a row always knows how
+            // big its conversation is — the flat list can still show "3" next
+            // to a mail without the caller having to ask a second question.
+            // Only the `rn=1` filter is conditional.
+            //
+            // `unread` and `starred` are aggregated over the thread: a
+            // collapsed row stands for all of it, and a conversation with one
+            // unread reply reads as unread. Ungrouped, the partition is still
+            // per-thread, so those aggregates would be wrong on a flat row —
+            // hence the two projections.
+            let pick = if q.group_threads {
+                "MAX(unread) OVER w AS row_unread, MAX(starred) OVER w AS row_starred"
+            } else {
+                "unread AS row_unread, starred AS row_starred"
+            };
+            let having = if q.group_threads { "WHERE rn=1" } else { "" };
             let sql = format!(
-                "SELECT id,account_id,folder,subject,from_name,from_addr,date,snippet,unread,starred,atts_json,category,analysis_json
-                 FROM messages WHERE {where_sql}
-                 ORDER BY date DESC LIMIT {limit} OFFSET {}",
+                "SELECT id,account_id,folder,subject,from_name,from_addr,date,snippet,
+                        row_unread,row_starred,atts_json,category,analysis_json,thread_id,thread_count
+                   FROM (
+                     SELECT id,account_id,folder,subject,from_name,from_addr,date,snippet,
+                            atts_json,category,analysis_json,thread_id,
+                            {pick},
+                            COUNT(*) OVER w AS thread_count,
+                            ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY date DESC, id DESC) AS rn
+                       FROM messages WHERE {where_sql}
+                       WINDOW w AS (PARTITION BY thread_id)
+                   ) {having}
+                  ORDER BY date DESC LIMIT {limit} OFFSET {}",
                 q.offset
             );
             let mut stmt = c.prepare(&sql)?;
@@ -932,6 +1078,26 @@ impl Store {
                 stmt.execute(params![id, (!read) as i64])?;
             }
             Ok(())
+        })
+    }
+
+    /// Mark a whole conversation read.
+    ///
+    /// A collapsed row stands for every message under it, so opening one has
+    /// to clear all of them — otherwise an unread reply further up the chain
+    /// keeps the row bold no matter how many times the user opens it.
+    ///
+    /// Returns how many messages changed.
+    pub fn set_thread_read(&self, thread_id: &str, read: bool) -> Result<u32> {
+        if thread_id.is_empty() {
+            return Ok(0);
+        }
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE messages SET unread=?2 WHERE thread_id=?1 AND deleted=0 AND unread<>?2",
+                params![thread_id, (!read) as i64],
+            )?;
+            Ok(n as u32)
         })
     }
 
@@ -1785,6 +1951,17 @@ impl Store {
         self.set_setting("reranker", &serde_json::to_string(s)?)
     }
 
+    pub fn reading_settings(&self) -> Result<ReadingSettings> {
+        match self.get_setting("reading")? {
+            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            None => Ok(ReadingSettings::default()),
+        }
+    }
+
+    pub fn set_reading_settings(&self, s: &ReadingSettings) -> Result<()> {
+        self.set_setting("reading", &serde_json::to_string(s)?)
+    }
+
     pub fn privacy_settings(&self) -> Result<PrivacySettings> {
         match self.get_setting("privacy")? {
             Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
@@ -1965,6 +2142,122 @@ fn is_cjk(c: char) -> bool {
         | 0xF900..=0xFAFF   // compatibility ideographs
         | 0x20000..=0x2FA1F // ext B and beyond
     )
+}
+
+/// Which conversation an arriving message belongs to.
+///
+/// Tried in order of how much the answer can be trusted; see `crate::thread`
+/// for why the subject rule is fenced the way it is. Falling all the way
+/// through means the message starts a thread of its own, which is why the
+/// last line is its own id rather than a null.
+///
+/// A message that cites an ancestor arriving *later* is not handled here — it
+/// cannot be, the ancestor is not in the table yet. `adopt_orphans` closes
+/// that case from the other side.
+fn resolve_thread(c: &Connection, m: &EmailMessage, subject: &thread::Subject) -> Result<String> {
+    // Closest ancestor first: `references` is ordered oldest → newest, and the
+    // nearest one we hold is the most specific answer available.
+    if !m.references.is_empty() {
+        let mut stmt = c.prepare_cached(
+            "SELECT thread_id FROM messages
+              WHERE account_id=?1 AND message_id=?2 AND thread_id<>'' LIMIT 1",
+        )?;
+        for cited in m.references.iter().rev() {
+            let found: Option<String> = stmt
+                .query_row(params![m.account_id, cited], |r| r.get(0))
+                .optional()?;
+            if let Some(t) = found {
+                return Ok(t);
+            }
+        }
+    }
+
+    // No usable chain. If the subject says this continues something, and we
+    // have that something recently enough, take it.
+    if subject.is_reply && !subject.norm.is_empty() {
+        let found: Option<String> = c
+            .query_row(
+                "SELECT thread_id FROM messages
+                  WHERE account_id=?1 AND subject_norm=?2 AND thread_id<>'' AND date>=?3
+                  ORDER BY date DESC LIMIT 1",
+                params![m.account_id, subject.norm, m.date - thread::SUBJECT_WINDOW_MS],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(t) = found {
+            return Ok(t);
+        }
+    }
+
+    Ok(m.id.clone())
+}
+
+/// Pull in threads that were waiting on this message.
+///
+/// Mail does not arrive in conversation order: a reply can be in INBOX while
+/// the mail it answers is still an unsynced item in Sent, and a fetch window
+/// that starts mid-thread leaves every earlier message to arrive afterwards.
+/// Those replies each started a thread of their own; now that their ancestor
+/// exists, those threads are this one.
+///
+/// The older thread absorbs the newer so the id stays anchored to whichever
+/// message actually came first — otherwise a late-arriving ancestor would
+/// renumber a conversation the user is already reading.
+fn adopt_orphans(c: &rusqlite::Transaction<'_>, m: &EmailMessage, mine: &str) -> Result<()> {
+    let Some(mid) = m.message_id.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let mut stmt = c.prepare(
+        "SELECT DISTINCT x.thread_id FROM message_refs r
+           JOIN messages x ON x.id = r.message_id
+          WHERE r.ref_id=?1 AND x.account_id=?2 AND x.thread_id<>'' AND x.thread_id<>?3",
+    )?;
+    let others = stmt
+        .query_map(params![mid, m.account_id, mine], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut winner = mine.to_string();
+    for other in others {
+        let (keep, drop_) = if thread_start(c, &other)? < thread_start(c, &winner)? {
+            (other, winner)
+        } else {
+            (winner, other)
+        };
+        c.execute("UPDATE messages SET thread_id=?1 WHERE thread_id=?2", params![keep, drop_])?;
+        winner = keep;
+    }
+    Ok(())
+}
+
+/// When the earliest message in a thread arrived. `i64::MAX` for a thread with
+/// no rows, so an empty one never wins a merge.
+fn thread_start(c: &Connection, thread_id: &str) -> Result<i64> {
+    let v: Option<i64> = c.query_row(
+        "SELECT MIN(date) FROM messages WHERE thread_id=?1",
+        params![thread_id],
+        |r| r.get(0),
+    )?;
+    Ok(v.unwrap_or(i64::MAX))
+}
+
+/// Record what a message cites, so the *reverse* lookup is an index hit.
+///
+/// This duplicates `refs_json`, deliberately: the column answers "what did
+/// this message say" when reading one row back, and the table answers "who
+/// cites this id" across all of them. One JSON column cannot do the second
+/// without a full scan on every insert.
+fn index_refs(c: &Connection, m: &EmailMessage) -> Result<()> {
+    if m.references.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = c.prepare_cached(
+        "INSERT OR IGNORE INTO message_refs (message_id, ref_id) VALUES (?1, ?2)",
+    )?;
+    for cited in &m.references {
+        stmt.execute(params![m.id, cited])?;
+    }
+    Ok(())
 }
 
 /// Write one message's index row, replacing whatever was there.
@@ -2177,6 +2470,12 @@ fn row_to_message(r: &Row<'_>) -> rusqlite::Result<EmailMessage> {
         folder: r.get("folder")?,
         uid: r.get("uid")?,
         message_id: r.get("message_id")?,
+        references: r
+            .get::<_, String>("refs_json")
+            .ok()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
+        thread_id: r.get("thread_id").unwrap_or_default(),
         subject: r.get("subject")?,
         from_name: r.get("from_name")?,
         from_addr: r.get("from_addr")?,
@@ -2214,6 +2513,8 @@ fn row_to_header(r: &Row<'_>) -> rusqlite::Result<MessageHeader> {
         category: category.as_deref().and_then(Category::parse),
         verification_code: analysis.as_ref().and_then(|a| a.verification_code.clone()),
         summary: analysis.map(|a| a.summary),
+        thread_id: r.get(13)?,
+        thread_count: r.get::<_, i64>(14)?.max(1) as u32,
     })
 }
 
@@ -2241,11 +2542,16 @@ mod tests {
 
     fn sample_message(id: &str, uid: &str) -> EmailMessage {
         EmailMessage {
+            references: Vec::new(),
+            thread_id: String::new(),
             id: id.into(),
             account_id: "acc1".into(),
             folder: "INBOX".into(),
             uid: uid.into(),
-            message_id: Some(format!("<{id}@example.com>")),
+            // Unwrapped, the way `parse_mail` stores it — the angle brackets
+            // are RFC syntax, not part of the identifier, and threading
+            // compares these against unwrapped `References` entries.
+            message_id: Some(format!("{id}@example.com")),
             subject: "Hello".into(),
             from_name: "Alice".into(),
             from_addr: "alice@example.com".into(),
@@ -2261,6 +2567,261 @@ mod tests {
             analysis: None,
             received_at: 1000,
         }
+    }
+
+    /// A message in a conversation: cites `refs`, dated `date`.
+    fn reply(id: &str, uid: &str, subject: &str, date: i64, refs: &[&str]) -> EmailMessage {
+        EmailMessage {
+            subject: subject.into(),
+            date,
+            received_at: date,
+            references: refs.iter().map(|r| (*r).to_string()).collect(),
+            ..sample_message(id, uid)
+        }
+    }
+
+    fn threaded_store() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        s
+    }
+
+    fn thread_of(s: &Store, id: &str) -> String {
+        s.get_message(id).unwrap().thread_id
+    }
+
+    #[test]
+    fn a_reply_joins_the_thread_it_cites() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch v2", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch v2", 2000, &["m1@example.com"])).unwrap();
+
+        assert_eq!(thread_of(&s, "m2"), "m1");
+        assert_eq!(s.thread_messages("m1").unwrap().len(), 2);
+    }
+
+    /// A mail nobody answers is a conversation of one — no null, no branch.
+    #[test]
+    fn an_unanswered_mail_is_its_own_thread() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch v2", 1000, &[])).unwrap();
+        assert_eq!(thread_of(&s, "m1"), "m1");
+    }
+
+    /// The exact rule beats the subject rule: a reply that cites its parent
+    /// belongs to it even when someone renamed the thread halfway through.
+    #[test]
+    fn references_win_over_a_changed_subject() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch v2", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: 换个标题", 2000, &["m1@example.com"])).unwrap();
+        assert_eq!(thread_of(&s, "m2"), "m1");
+    }
+
+    /// The fallback, for the many clients that drop References entirely.
+    #[test]
+    fn a_reply_subject_joins_by_subject_when_nothing_is_cited() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "发票", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "回复: 发票", 2000, &[])).unwrap();
+        assert_eq!(thread_of(&s, "m2"), "m1");
+    }
+
+    /// The fence on the subject rule. Two people sending an unrelated 「发票」
+    /// are two conversations, and without the reply-prefix requirement every
+    /// mail with a common subject would collapse into one row.
+    #[test]
+    fn two_originals_with_the_same_subject_stay_apart() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "发票", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "发票", 2000, &[])).unwrap();
+        assert_ne!(thread_of(&s, "m1"), thread_of(&s, "m2"));
+    }
+
+    #[test]
+    fn the_subject_rule_gives_up_after_a_month() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "发票", 1000, &[])).unwrap();
+        let late = 1000 + thread::SUBJECT_WINDOW_MS + 1;
+        s.insert_message(&reply("m2", "2", "回复: 发票", late, &[])).unwrap();
+        assert_ne!(thread_of(&s, "m2"), "m1");
+    }
+
+    /// Sent and INBOX sync at different times, so the ancestor routinely lands
+    /// after the reply that names it.
+    #[test]
+    fn an_ancestor_arriving_late_absorbs_the_thread_its_children_started() {
+        let s = threaded_store();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+        // m2 could not find m1, so it opened its own thread.
+        assert_eq!(thread_of(&s, "m2"), "m2");
+
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        // The older message wins, so the id stays anchored to the real root.
+        assert_eq!(thread_of(&s, "m1"), "m1");
+        assert_eq!(thread_of(&s, "m2"), "m1");
+        assert_eq!(s.thread_messages("m1").unwrap().len(), 2);
+    }
+
+    /// The whole subtree moves, not just the message that cited the newcomer.
+    #[test]
+    fn a_late_ancestor_pulls_the_replies_of_its_replies_too() {
+        let s = threaded_store();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+        s.insert_message(&reply("m3", "3", "Re: Patch", 3000, &["m2@example.com"])).unwrap();
+        assert_eq!(thread_of(&s, "m3"), "m2");
+
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        assert_eq!(s.thread_messages("m1").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn threads_never_cross_accounts() {
+        let s = threaded_store();
+        s.insert_account(&AccountConfig { id: "acc2".into(), ..sample_account() }).unwrap();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        let other = EmailMessage {
+            account_id: "acc2".into(),
+            ..reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])
+        };
+        s.insert_message(&other).unwrap();
+        assert_ne!(thread_of(&s, "m2"), "m1");
+    }
+
+    #[test]
+    fn grouping_collapses_a_thread_to_its_newest_message() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+        s.insert_message(&reply("m3", "3", "别的事", 3000, &[])).unwrap();
+
+        let page = s
+            .query_messages(&MessageQuery { group_threads: true, ..Default::default() })
+            .unwrap();
+        assert_eq!(page.total, 2, "two conversations, three messages");
+        assert_eq!(page.items.len(), 2);
+        // Newest first: the standalone mail, then the thread's latest reply.
+        assert_eq!(page.items[0].id, "m3");
+        assert_eq!(page.items[1].id, "m2");
+        assert_eq!(page.items[1].thread_count, 2);
+        assert_eq!(page.items[0].thread_count, 1);
+    }
+
+    /// Ungrouped, every message is a row again — and still knows its thread.
+    #[test]
+    fn not_grouping_returns_every_message() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+
+        let page = s.query_messages(&MessageQuery::default()).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].thread_id, "m1");
+        assert_eq!(page.items[0].thread_count, 2);
+    }
+
+    /// One unread reply makes the collapsed row unread — the row stands for
+    /// the whole conversation, so its badge has to as well.
+    #[test]
+    fn a_grouped_row_is_unread_when_any_message_in_it_is() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+        // The newest is read; the older one is not.
+        s.set_read(&["m2".to_string()], true).unwrap();
+
+        let page = s
+            .query_messages(&MessageQuery { group_threads: true, ..Default::default() })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.unread, 1, "the thread still holds something unread");
+        assert!(page.items[0].unread);
+    }
+
+    /// Threading is a view over the filter, not over the mailbox: a thread
+    /// whose replies are in another category counts what the filter left.
+    #[test]
+    fn thread_count_reflects_the_active_filter() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+        s.set_starred("m2", true).unwrap();
+
+        let page = s
+            .query_messages(&MessageQuery {
+                group_threads: true,
+                starred_only: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].thread_count, 1, "only the starred reply matched");
+    }
+
+    /// Rows stored before threading existed. The subject rule is all the
+    /// backfill has, and it is enough for the ordinary case.
+    #[test]
+    fn backfill_threads_rebuilds_conversations_from_subjects() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &[])).unwrap();
+        // Put them back the way an upgraded database would look.
+        s.with(|c| {
+            c.execute("UPDATE messages SET thread_id='', subject_norm=''", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(s.unthreaded_count().unwrap(), 2);
+        assert_eq!(s.backfill_threads(100).unwrap(), 2);
+        assert_eq!(s.unthreaded_count().unwrap(), 0);
+        assert_eq!(thread_of(&s, "m2"), "m1");
+    }
+
+    #[test]
+    fn backfill_threads_stops_at_its_limit_and_resumes() {
+        let s = threaded_store();
+        for i in 0..5 {
+            s.insert_message(&reply(&format!("m{i}"), &i.to_string(), "Patch", 1000 + i, &[]))
+                .unwrap();
+        }
+        s.with(|c| {
+            c.execute("UPDATE messages SET thread_id=''", []).unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(s.backfill_threads(2).unwrap(), 2);
+        assert_eq!(s.unthreaded_count().unwrap(), 3);
+        assert_eq!(s.backfill_threads(100).unwrap(), 3);
+        assert_eq!(s.unthreaded_count().unwrap(), 0);
+    }
+
+    /// Opening a collapsed row clears the whole conversation — including the
+    /// reply the user could not see from the list.
+    #[test]
+    fn marking_a_thread_read_clears_every_message_in_it() {
+        let s = threaded_store();
+        s.insert_message(&reply("m1", "1", "Patch", 1000, &[])).unwrap();
+        s.insert_message(&reply("m2", "2", "Re: Patch", 2000, &["m1@example.com"])).unwrap();
+
+        assert_eq!(s.set_thread_read("m1", true).unwrap(), 2);
+        let page = s
+            .query_messages(&MessageQuery { group_threads: true, ..Default::default() })
+            .unwrap();
+        assert_eq!(page.unread, 0);
+        assert!(!page.items[0].unread);
+        // Idempotent: nothing left to change on a second open.
+        assert_eq!(s.set_thread_read("m1", true).unwrap(), 0);
+    }
+
+    #[test]
+    fn reading_settings_default_to_grouping() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.reading_settings().unwrap().group_threads);
+        s.set_reading_settings(&ReadingSettings { group_threads: false }).unwrap();
+        assert!(!s.reading_settings().unwrap().group_threads);
     }
 
     #[test]
@@ -2688,7 +3249,7 @@ mod tests {
 
         // A different message may now claim UID 7 without a uniqueness clash.
         let mut fresh = sample_message("m2", "7");
-        fresh.message_id = Some("<m2@example.com>".into());
+        fresh.message_id = Some("m2@example.com".into());
         assert!(s.insert_message(&fresh).unwrap());
 
         // Clearing twice must not re-mangle already-retired rows.

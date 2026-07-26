@@ -37,6 +37,7 @@ import type {
   NotifyChannel,
   OutgoingMail,
   PrivacySettings,
+  ReadingSettings,
   RerankerSettingsInput,
   RerankerSettingsPublic,
   SearchHit,
@@ -136,6 +137,18 @@ export const listLabels = () => invoke<MailLabel[]>("list_labels");
 export const labelCounts = () => invoke<LabelCount[]>("label_counts");
 export const saveLabel = (input: LabelInput) => invoke<MailLabel[]>("save_label", { input });
 export const deleteLabel = (id: string) => invoke<MailLabel[]>("delete_label", { id });
+
+// -- reading / threading ----------------------------------------------------
+
+export const getReadingSettings = () => invoke<ReadingSettings>("get_reading_settings");
+export const setReadingSettings = (input: ReadingSettings) =>
+  invoke<ReadingSettings>("set_reading_settings", { input });
+/** Every message in one conversation, oldest first. */
+export const threadMessages = (threadId: string) =>
+  invoke<EmailMessage[]>("thread_messages", { threadId });
+/** Mark a whole conversation read; returns how many messages changed. */
+export const markThreadRead = (threadId: string, read: boolean) =>
+  invoke<number>("mark_thread_read", { threadId, read });
 
 // -- privacy / trackers -----------------------------------------------------
 

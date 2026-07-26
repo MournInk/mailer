@@ -925,6 +925,8 @@ mod tests {
 
     fn message(id: &str, subject: &str) -> EmailMessage {
         EmailMessage {
+            references: Vec::new(),
+            thread_id: String::new(),
             id: id.into(),
             account_id: "acc1".into(),
             folder: "INBOX".into(),

@@ -520,6 +520,11 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
             <p className="mv-text mv-nobody">这封邮件没有正文内容。</p>
           )}
 
+          {/* -- the rest of the conversation ---------------------------------
+              After the body, not before it: the mail you clicked is what you
+              came to read, and the history is what you reach for afterwards. */}
+          <ThreadStrip msg={msg} />
+
           {/* -- attachments --------------------------------------------------- */}
           {msg.attachments.length > 0 && (
             <section className="mv-atts" aria-label="附件">
@@ -538,6 +543,101 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
       </div>
     </>
   );
+}
+
+/**
+ * The rest of the conversation, in the order it happened.
+ *
+ * The open message keeps the pane — its analysis, its tracker report, its
+ * attachments all belong to it. What the thread adds is context, so the other
+ * messages arrive collapsed: sender, date, and the first line, which is what
+ * you need to remember where you were. Expanding one reveals its body inline;
+ * opening it properly is one click further on.
+ *
+ * Remote content stays blocked in here regardless of the setting. An expanded
+ * summary is a glance, not a read, and quietly firing a tracking pixel for
+ * every mail in a long thread because the user unfolded one of them is not a
+ * trade this view gets to make on their behalf.
+ */
+function ThreadStrip({ msg }: { msg: EmailMessage }) {
+  const { select } = useApp();
+  const [chain, setChain] = useState<EmailMessage[]>([]);
+  const [open, setOpen] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setChain([]);
+    setOpen(null);
+    if (!msg.threadId) return;
+    void api
+      .threadMessages(msg.threadId)
+      .then((c) => {
+        if (live) setChain(c);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [msg.threadId, msg.id]);
+
+  const others = chain.filter((m) => m.id !== msg.id);
+  if (others.length === 0) return null;
+
+  return (
+    <section className="mv-thread" aria-label="这场对话的其他邮件">
+      <div className="mv-thread-head">
+        <Icon name="mail" size={14} />
+        <span className="mv-thread-title">这场对话共 {chain.length} 封</span>
+        <span className="mv-thread-hint">下面是其余 {others.length} 封，按时间排列</span>
+      </div>
+
+      <ul className="mv-thread-list">
+        {others.map((m) => {
+          const expanded = open === m.id;
+          return (
+            <li key={m.id} className={`mv-thread-row${expanded ? " open" : ""}`}>
+              <button
+                className="mv-thread-line"
+                onClick={() => setOpen(expanded ? null : m.id)}
+                aria-expanded={expanded}
+              >
+                <Icon name={expanded ? "chevron-down" : "chevron-right"} size={13} />
+                <span className="mv-thread-from">{m.fromName || m.fromAddr}</span>
+                <span className="mv-thread-snippet">{m.snippet}</span>
+                <time className="mv-thread-date" dateTime={new Date(m.date).toISOString()}>
+                  {formatFullDate(m.date)}
+                </time>
+              </button>
+
+              {expanded && (
+                <div className="mv-thread-body">
+                  <ThreadBody msg={m} />
+                  <button className="btn btn-sm" onClick={() => void select(m.id)}>
+                    <Icon name="mail" size={14} />
+                    单独打开这封
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+/** One expanded message inside the strip. Remote content always blocked. */
+function ThreadBody({ msg }: { msg: EmailMessage }) {
+  const body = useMemo(
+    () => (msg.bodyHtml ? sanitizeBody(msg.bodyHtml, false) : null),
+    [msg.bodyHtml],
+  );
+  if (body) {
+    /* sanitizeBody() is the only path that produces this string */
+    return <div className="mv-html" dangerouslySetInnerHTML={{ __html: body.html }} />;
+  }
+  if (msg.bodyText) return <div className="mv-text">{msg.bodyText}</div>;
+  return <p className="mv-text mv-nobody">这封邮件没有正文内容。</p>;
 }
 
 /** Attachments are metadata only — there is no download command yet. */

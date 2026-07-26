@@ -187,6 +187,14 @@ pub struct EmailMessage {
     pub uid: String,
     /// RFC 5322 Message-ID header, used for cross-protocol dedup.
     pub message_id: Option<String>,
+    /// Every ancestor this message cites, oldest first — `References` plus
+    /// `In-Reply-To`, deduped and unwrapped. The raw material for threading.
+    #[serde(default)]
+    pub references: Vec<String>,
+    /// The conversation this message belongs to. Assigned by the store on
+    /// insert; a message that starts a thread carries its own id here.
+    #[serde(default)]
+    pub thread_id: String,
     pub subject: String,
     pub from_name: String,
     pub from_addr: String,
@@ -224,6 +232,14 @@ pub struct MessageHeader {
     pub category: Option<Category>,
     pub verification_code: Option<String>,
     pub summary: Option<String>,
+    /// The conversation this row stands for.
+    #[serde(default)]
+    pub thread_id: String,
+    /// How many messages the conversation holds *within the current filter*.
+    /// 1 for a mail with no replies — and for every row when the list is not
+    /// grouping, so the UI can render a count without asking whether it is.
+    #[serde(default)]
+    pub thread_count: u32,
 }
 
 /// Query filter for the message list.
@@ -239,6 +255,8 @@ pub struct MessageQuery {
     pub starred_only: bool,
     /// Substring search over subject / sender / snippet.
     pub search: Option<String>,
+    /// Collapse each conversation to its newest matching message.
+    pub group_threads: bool,
     pub limit: u32,
     pub offset: u32,
 }
@@ -812,6 +830,21 @@ pub struct PrivacySettings {
 impl Default for PrivacySettings {
     fn default() -> Self {
         PrivacySettings { block_trackers: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReadingSettings {
+    /// Show a reply chain as one row instead of one row per message. On by
+    /// default — but a real preference, not a fix: plenty of people read mail
+    /// as a stream and find a collapsed conversation actively worse.
+    pub group_threads: bool,
+}
+
+impl Default for ReadingSettings {
+    fn default() -> Self {
+        ReadingSettings { group_threads: true }
     }
 }
 

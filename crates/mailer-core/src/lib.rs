@@ -23,6 +23,7 @@ pub mod notify;
 pub mod rag;
 pub mod store;
 pub mod sync;
+pub mod thread;
 pub mod tools;
 pub mod trackers;
 pub mod types;

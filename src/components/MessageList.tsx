@@ -586,6 +586,11 @@ function MessageRow({
 
         <div className="ml-line">
           <span className="ml-subject">{item.subject || "(无主题)"}</span>
+          {item.threadCount > 1 && (
+            <span className="ml-thread" title={`这个会话有 ${item.threadCount} 封邮件`}>
+              {item.threadCount}
+            </span>
+          )}
           {item.category && (
             <span className={`badge badge-${item.category} ml-cat`}>
               {CATEGORY_LABEL[item.category]}

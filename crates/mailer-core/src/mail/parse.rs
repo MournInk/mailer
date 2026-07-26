@@ -32,6 +32,21 @@ const UNNAMED_ATTACHMENT: &str = "未命名附件";
 /// Fallback MIME type for parts without a usable Content-Type.
 const DEFAULT_MIME: &str = "application/octet-stream";
 
+/// The IDs in a `References`-shaped header.
+///
+/// A single ID parses as `Text` and several as `TextList`, and a client that
+/// wrote a malformed one leaves neither — all three shapes have to be handled
+/// or threading quietly stops working for whoever sent that mail.
+fn id_list(v: &mail_parser::HeaderValue<'_>) -> Vec<String> {
+    match v {
+        mail_parser::HeaderValue::Text(s) => vec![s.as_ref().to_string()],
+        mail_parser::HeaderValue::TextList(list) => {
+            list.iter().map(|s| s.as_ref().to_string()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The parser itself is stateless, but constructing it builds a header
 /// dispatch table; build that once for the whole process.
 fn parser() -> &'static MessageParser {
@@ -55,6 +70,7 @@ pub fn parse_mail(id: String, account_id: &str, raw: &RawMail, now_ms: i64) -> R
     let (from_name, from_addr) = first_addr(parsed.from());
     let to_addrs = addr_list(parsed.to());
     let message_id = parsed.message_id().map(str::to_string);
+    let references = crate::thread::ancestors(&id_list(parsed.references()), &id_list(parsed.in_reply_to()));
 
     // Date header → unix millis. Absent or nonsensical dates (year 0, month
     // 13, ...) fall back to the ingest time so the list still sorts sanely.
@@ -106,6 +122,10 @@ pub fn parse_mail(id: String, account_id: &str, raw: &RawMail, now_ms: i64) -> R
         folder: raw.folder.clone(),
         uid: raw.uid.clone(),
         message_id,
+        references,
+        // The store owns this: it is the one place that can see the mails this
+        // one is a reply to.
+        thread_id: String::new(),
         subject,
         from_name,
         from_addr,
@@ -363,6 +383,36 @@ mod tests {
         "\r\n",
         "the   report is attached.\r\n",
     );
+
+    /// Threading needs both headers, unwrapped and in chain order.
+    #[test]
+    fn reference_headers_become_the_ancestor_chain() {
+        let msg = parse(
+            concat!(
+                "Subject: Re: Weekly report\r\n",
+                "References: <a@example.com> <b@example.com>\r\n",
+                "In-Reply-To: <b@example.com>\r\n",
+                "\r\n",
+                "body\r\n",
+            ),
+            999,
+        );
+        assert_eq!(msg.references, ["a@example.com", "b@example.com"]);
+    }
+
+    /// A single ID parses as a different header shape than several.
+    #[test]
+    fn a_lone_in_reply_to_still_counts() {
+        let msg = parse("In-Reply-To: <a@example.com>\r\n\r\nbody\r\n", 999);
+        assert_eq!(msg.references, ["a@example.com"]);
+    }
+
+    #[test]
+    fn mail_that_cites_nothing_has_no_ancestors() {
+        let msg = parse(PLAIN, 999);
+        assert!(msg.references.is_empty());
+        assert!(msg.thread_id.is_empty(), "the store assigns this, not the parser");
+    }
 
     #[test]
     fn plain_ascii_mail() {
