@@ -177,6 +177,7 @@ const PATHS: Record<string, React.ReactNode> = {
     </>
   ),
   loader: <path d="M21 12a9 9 0 1 1-6.22-8.56" />,
+  filter: <path d="M21.5 4H2.5l7.6 8.98V19.5l3.8 2v-8.52z" />,
 };
 
 export function Icon({

@@ -149,9 +149,17 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
         aria-label={isReply ? "回复邮件" : "写邮件"}
       >
         <header className="cp-head">
-          <h2 className="cp-title">{isReply ? "回复" : "写邮件"}</h2>
+          <span className="cp-mark" aria-hidden="true">
+            <Icon name={isReply ? "reply" : "edit"} size={16} />
+          </span>
+          <span className="cp-headings">
+            <h2 className="cp-title">{isReply ? "回复" : "写邮件"}</h2>
+            <span className="cp-sub">
+              {isReply ? "回复这封邮件的发件人" : "从你的某个账户发出一封新邮件"}
+            </span>
+          </span>
           <button
-            className="icon-btn"
+            className="icon-btn cp-close"
             onClick={closeCompose}
             disabled={sending}
             aria-label="关闭"
@@ -181,8 +189,9 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
               ))}
             </select>
             {!canSend && (
-              <p className="field-hint cp-warn">
-                该账户未配置发件服务器，请先在设置中补充 SMTP 信息。
+              <p className="cp-warn">
+                <Icon name="alert" size={14} />
+                <span>该账户未配置发件服务器，暂时无法发送。请先到「设置 › 账户」中补充 SMTP 信息。</span>
               </p>
             )}
           </div>
@@ -241,14 +250,19 @@ function ComposeDialog({ initial }: { initial: ComposeState }) {
         </div>
 
         <footer className="cp-foot">
-          <span className="cp-shortcut">⌘/Ctrl + Enter 发送</span>
-          <button className="btn" onClick={closeCompose} disabled={sending}>
+          <span className="cp-shortcut">
+            <kbd className="cp-kbd">⌘/Ctrl</kbd>
+            <kbd className="cp-kbd">Enter</kbd>
+            <span className="cp-shortcut-text">发送</span>
+          </span>
+          <button className="btn cp-cancel" onClick={closeCompose} disabled={sending}>
             取消
           </button>
           <button
-            className="btn btn-primary"
+            className="btn btn-primary cp-send"
             onClick={() => void send()}
             disabled={sending || !canSend}
+            title={canSend ? "发送（⌘/Ctrl + Enter）" : "该账户未配置发件服务器"}
           >
             <Icon
               name={sending ? "loader" : "send"}

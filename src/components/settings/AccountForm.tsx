@@ -21,7 +21,7 @@ import type {
   TlsMode,
 } from "../../lib/types";
 import { Icon } from "../Icon";
-import { TestOutput } from "./parts";
+import { Group, TestOutput } from "./parts";
 import {
   CUSTOM_PRESET,
   PRESETS,
@@ -289,6 +289,9 @@ export function AccountForm({
       }}
     >
       <header className="set-section-head">
+        <span className="set-section-mark">
+          <Icon name="mail" size={15} />
+        </span>
         <div className="set-section-text">
           <h2 className="set-section-title">{isEdit ? "编辑邮箱" : "添加邮箱"}</h2>
           <p className="set-section-sub">
@@ -313,7 +316,7 @@ export function AccountForm({
         {/* -- provider ------------------------------------------------------ */}
         <div className="field">
           <span className="field-label">服务商</span>
-          <div className="set-chips">
+          <div className="set-choices">
             {PRESETS.map((p) => (
               <PresetChip
                 key={p.id}
@@ -332,292 +335,294 @@ export function AccountForm({
         </div>
 
         {/* -- identity ------------------------------------------------------ */}
-        <div className="set-grid">
-          <div className="field">
-            <label className="field-label" htmlFor="ac-email">
-              邮箱地址
-            </label>
-            <input
-              id="ac-email"
-              className="input set-mono"
-              value={draft.email}
-              disabled={busy}
-              autoComplete="off"
-              placeholder="name@example.com"
-              onChange={(e) => onEmail(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field-label" htmlFor="ac-label">
-              显示名称
-            </label>
-            <input
-              id="ac-label"
-              className="input"
-              value={draft.label}
-              disabled={busy}
-              placeholder={draft.email || "工作邮箱"}
-              onChange={(e) => patch({ label: e.target.value })}
-            />
-            <p className="field-hint">留空则使用邮箱地址。</p>
-          </div>
-        </div>
-
-        <div className="set-grid">
-          <div className="field">
-            <label className="field-label" htmlFor="ac-interval">
-              同步频率
-            </label>
-            <select
-              id="ac-interval"
-              className="select"
-              value={draft.syncIntervalSecs}
-              disabled={busy}
-              onChange={(e) => patch({ syncIntervalSecs: Number(e.target.value) })}
-            >
-              {SYNC_OPTIONS.map((o) => (
-                <option key={o.secs} value={o.secs}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field">
-            <span className="field-label">标识色</span>
-            <div className="set-hues">
-              {HUES.map((hue) => (
-                <button
-                  key={hue}
-                  type="button"
-                  className={`set-hue${draft.colorHue === hue ? " active" : ""}`}
-                  style={{ background: `hsl(${hue} 55% 45%)` }}
-                  disabled={busy}
-                  aria-label={`色相 ${hue}`}
-                  aria-pressed={draft.colorHue === hue}
-                  onClick={() => patch({ colorHue: hue })}
-                />
-              ))}
+        <Group title="账户信息" hint="显示名称与标识色只影响侧边栏里的样子。">
+          <div className="set-grid">
+            <div className="field">
+              <label className="field-label" htmlFor="ac-email">
+                邮箱地址
+              </label>
+              <input
+                id="ac-email"
+                className="input set-mono"
+                value={draft.email}
+                disabled={busy}
+                autoComplete="off"
+                placeholder="name@example.com"
+                onChange={(e) => onEmail(e.target.value)}
+              />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="ac-label">
+                显示名称
+              </label>
+              <input
+                id="ac-label"
+                className="input"
+                value={draft.label}
+                disabled={busy}
+                placeholder={draft.email || "工作邮箱"}
+                onChange={(e) => patch({ label: e.target.value })}
+              />
+              <p className="field-hint">留空则使用邮箱地址。</p>
             </div>
           </div>
-        </div>
+
+          <div className="set-grid">
+            <div className="field">
+              <label className="field-label" htmlFor="ac-interval">
+                同步频率
+              </label>
+              <select
+                id="ac-interval"
+                className="select"
+                value={draft.syncIntervalSecs}
+                disabled={busy}
+                onChange={(e) => patch({ syncIntervalSecs: Number(e.target.value) })}
+              >
+                {SYNC_OPTIONS.map((o) => (
+                  <option key={o.secs} value={o.secs}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <span className="field-label">标识色</span>
+              <div className="set-hues">
+                {HUES.map((hue) => (
+                  <button
+                    key={hue}
+                    type="button"
+                    className={`set-hue${draft.colorHue === hue ? " active" : ""}`}
+                    style={{ background: `hsl(${hue} 55% 45%)` }}
+                    disabled={busy}
+                    aria-label={`色相 ${hue}`}
+                    aria-pressed={draft.colorHue === hue}
+                    onClick={() => patch({ colorHue: hue })}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+        </Group>
 
         {/* -- receiving ----------------------------------------------------- */}
-        <div className="set-divider" />
-        <h3 className="set-sub-title">收件服务器</h3>
-
-        <div className="set-grid">
-          <div className="field">
-            <label className="field-label" htmlFor="ac-protocol">
-              协议
-            </label>
-            <select
-              id="ac-protocol"
-              className="select"
-              value={draft.protocol}
-              disabled={busy}
-              onChange={(e) => onProtocol(e.target.value as Protocol)}
-            >
-              {(Object.keys(PROTOCOL_LABEL) as Protocol[]).map((p) => (
-                <option key={p} value={p}>
-                  {PROTOCOL_LABEL[p]}
-                </option>
-              ))}
-            </select>
-            {preset && draft.protocol === "pop3" && preset.pop3 === null &&
-              preset.id !== CUSTOM_PRESET && (
-                <p className="field-hint set-warn-text">
-                  {preset.name} 不提供 POP3 服务，请改用 IMAP。
-                </p>
-              )}
-          </div>
-          <div className="field">
-            <label className="field-label" htmlFor="ac-tls">
-              加密方式
-            </label>
-            <select
-              id="ac-tls"
-              className="select"
-              value={draft.tls}
-              disabled={busy}
-              onChange={(e) => onServerField({ tls: e.target.value as TlsMode })}
-            >
-              {(Object.keys(TLS_LABEL) as TlsMode[]).map((t) => (
-                <option key={t} value={t}>
-                  {TLS_LABEL[t]}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div className="set-grid host-port">
-          <div className="field">
-            <label className="field-label" htmlFor="ac-host">
-              服务器地址
-            </label>
-            <input
-              id="ac-host"
-              className="input set-mono"
-              value={draft.host}
-              disabled={busy}
-              autoComplete="off"
-              placeholder="imap.example.com"
-              onChange={(e) => onServerField({ host: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label className="field-label" htmlFor="ac-port">
-              端口
-            </label>
-            <input
-              id="ac-port"
-              className="input set-mono"
-              value={draft.port}
-              disabled={busy}
-              inputMode="numeric"
-              placeholder="993"
-              onChange={(e) => onServerField({ port: e.target.value })}
-            />
-          </div>
-        </div>
-
-        <div className="set-grid">
-          <div className="field">
-            <label className="field-label" htmlFor="ac-user">
-              用户名
-            </label>
-            <input
-              id="ac-user"
-              className="input set-mono"
-              value={draft.username}
-              disabled={busy}
-              autoComplete="off"
-              placeholder={draft.email || "通常为完整邮箱地址"}
-              onChange={(e) => {
-                setManualUser(true);
-                patch({ username: e.target.value });
-              }}
-            />
-          </div>
-          <div className="field">
-            <label className="field-label" htmlFor="ac-pass">
-              密码 / 授权码
-            </label>
-            <input
-              id="ac-pass"
-              className="input"
-              type="password"
-              value={draft.password}
-              disabled={busy}
-              autoComplete="new-password"
-              placeholder={isEdit ? "保持不变" : "邮箱授权码"}
-              onChange={(e) => patch({ password: e.target.value })}
-            />
-          </div>
-        </div>
-
-        {/* -- sending ------------------------------------------------------- */}
-        <div className="set-divider" />
-        <div className="set-sub-head">
-          <h3 className="set-sub-title">发件服务器（SMTP）</h3>
-          <button
-            type="button"
-            className={`switch${draft.useSmtp ? " on" : ""}`}
-            role="switch"
-            aria-checked={draft.useSmtp}
-            aria-label="启用发件服务器"
-            disabled={busy}
-            onClick={() => patch({ useSmtp: !draft.useSmtp })}
-          />
-        </div>
-        <p className="field-hint">不配置也能正常收信，只是无法在应用内写信与回复。</p>
-
-        {draft.useSmtp && (
-          <>
-            <div className="set-grid host-port">
-              <div className="field">
-                <label className="field-label" htmlFor="ac-smtp-host">
-                  服务器地址
-                </label>
-                <input
-                  id="ac-smtp-host"
-                  className="input set-mono"
-                  value={draft.smtpHost}
-                  disabled={busy}
-                  autoComplete="off"
-                  placeholder="smtp.example.com"
-                  onChange={(e) => onServerField({ smtpHost: e.target.value })}
-                />
-              </div>
-              <div className="field">
-                <label className="field-label" htmlFor="ac-smtp-port">
-                  端口
-                </label>
-                <input
-                  id="ac-smtp-port"
-                  className="input set-mono"
-                  value={draft.smtpPort}
-                  disabled={busy}
-                  inputMode="numeric"
-                  placeholder="465"
-                  onChange={(e) => onServerField({ smtpPort: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div className="set-grid">
-              <div className="field">
-                <label className="field-label" htmlFor="ac-smtp-tls">
-                  加密方式
-                </label>
-                <select
-                  id="ac-smtp-tls"
-                  className="select"
-                  value={draft.smtpTls}
-                  disabled={busy}
-                  onChange={(e) => onServerField({ smtpTls: e.target.value as TlsMode })}
-                >
-                  {(Object.keys(TLS_LABEL) as TlsMode[]).map((t) => (
-                    <option key={t} value={t}>
-                      {TLS_LABEL[t]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="field">
-                <label className="field-label" htmlFor="ac-smtp-user">
-                  用户名
-                </label>
-                <input
-                  id="ac-smtp-user"
-                  className="input set-mono"
-                  value={draft.smtpUsername}
-                  disabled={busy}
-                  autoComplete="off"
-                  placeholder="同收件用户名"
-                  onChange={(e) => patch({ smtpUsername: e.target.value })}
-                />
-              </div>
-            </div>
-
+        <Group title="收件服务器" hint="决定 Mailer 从哪里、以多快的频率取回邮件。">
+          <div className="set-grid">
             <div className="field">
-              <label className="field-label" htmlFor="ac-smtp-pass">
+              <label className="field-label" htmlFor="ac-protocol">
+                协议
+              </label>
+              <select
+                id="ac-protocol"
+                className="select"
+                value={draft.protocol}
+                disabled={busy}
+                onChange={(e) => onProtocol(e.target.value as Protocol)}
+              >
+                {(Object.keys(PROTOCOL_LABEL) as Protocol[]).map((p) => (
+                  <option key={p} value={p}>
+                    {PROTOCOL_LABEL[p]}
+                  </option>
+                ))}
+              </select>
+              {preset && draft.protocol === "pop3" && preset.pop3 === null &&
+                preset.id !== CUSTOM_PRESET && (
+                  <p className="field-hint set-warn-text">
+                    {preset.name} 不提供 POP3 服务，请改用 IMAP。
+                  </p>
+                )}
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="ac-tls">
+                加密方式
+              </label>
+              <select
+                id="ac-tls"
+                className="select"
+                value={draft.tls}
+                disabled={busy}
+                onChange={(e) => onServerField({ tls: e.target.value as TlsMode })}
+              >
+                {(Object.keys(TLS_LABEL) as TlsMode[]).map((t) => (
+                  <option key={t} value={t}>
+                    {TLS_LABEL[t]}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="set-grid host-port">
+            <div className="field">
+              <label className="field-label" htmlFor="ac-host">
+                服务器地址
+              </label>
+              <input
+                id="ac-host"
+                className="input set-mono"
+                value={draft.host}
+                disabled={busy}
+                autoComplete="off"
+                placeholder="imap.example.com"
+                onChange={(e) => onServerField({ host: e.target.value })}
+              />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="ac-port">
+                端口
+              </label>
+              <input
+                id="ac-port"
+                className="input set-mono"
+                value={draft.port}
+                disabled={busy}
+                inputMode="numeric"
+                placeholder="993"
+                onChange={(e) => onServerField({ port: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <div className="set-grid">
+            <div className="field">
+              <label className="field-label" htmlFor="ac-user">
+                用户名
+              </label>
+              <input
+                id="ac-user"
+                className="input set-mono"
+                value={draft.username}
+                disabled={busy}
+                autoComplete="off"
+                placeholder={draft.email || "通常为完整邮箱地址"}
+                onChange={(e) => {
+                  setManualUser(true);
+                  patch({ username: e.target.value });
+                }}
+              />
+            </div>
+            <div className="field">
+              <label className="field-label" htmlFor="ac-pass">
                 密码 / 授权码
               </label>
               <input
-                id="ac-smtp-pass"
+                id="ac-pass"
                 className="input"
                 type="password"
-                value={draft.smtpPassword}
+                value={draft.password}
                 disabled={busy}
                 autoComplete="new-password"
-                placeholder={isEdit ? "保持不变" : "留空则与收件密码相同"}
-                onChange={(e) => patch({ smtpPassword: e.target.value })}
+                placeholder={isEdit ? "保持不变" : "邮箱授权码"}
+                onChange={(e) => patch({ password: e.target.value })}
               />
-              <p className="field-hint">绝大多数邮箱的收发件密码相同，留空即可。</p>
             </div>
-          </>
-        )}
+          </div>
+        </Group>
+
+        {/* -- sending ------------------------------------------------------- */}
+        <Group
+          title="发件服务器（SMTP）"
+          hint="不配置也能正常收信，只是无法在应用内写信与回复。"
+          action={
+            <button
+              type="button"
+              className={`switch${draft.useSmtp ? " on" : ""}`}
+              role="switch"
+              aria-checked={draft.useSmtp}
+              aria-label="启用发件服务器"
+              disabled={busy}
+              onClick={() => patch({ useSmtp: !draft.useSmtp })}
+            />
+          }
+        >
+          {draft.useSmtp && (
+            <>
+              <div className="set-grid host-port">
+                <div className="field">
+                  <label className="field-label" htmlFor="ac-smtp-host">
+                    服务器地址
+                  </label>
+                  <input
+                    id="ac-smtp-host"
+                    className="input set-mono"
+                    value={draft.smtpHost}
+                    disabled={busy}
+                    autoComplete="off"
+                    placeholder="smtp.example.com"
+                    onChange={(e) => onServerField({ smtpHost: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="ac-smtp-port">
+                    端口
+                  </label>
+                  <input
+                    id="ac-smtp-port"
+                    className="input set-mono"
+                    value={draft.smtpPort}
+                    disabled={busy}
+                    inputMode="numeric"
+                    placeholder="465"
+                    onChange={(e) => onServerField({ smtpPort: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="set-grid">
+                <div className="field">
+                  <label className="field-label" htmlFor="ac-smtp-tls">
+                    加密方式
+                  </label>
+                  <select
+                    id="ac-smtp-tls"
+                    className="select"
+                    value={draft.smtpTls}
+                    disabled={busy}
+                    onChange={(e) => onServerField({ smtpTls: e.target.value as TlsMode })}
+                  >
+                    {(Object.keys(TLS_LABEL) as TlsMode[]).map((t) => (
+                      <option key={t} value={t}>
+                        {TLS_LABEL[t]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="ac-smtp-user">
+                    用户名
+                  </label>
+                  <input
+                    id="ac-smtp-user"
+                    className="input set-mono"
+                    value={draft.smtpUsername}
+                    disabled={busy}
+                    autoComplete="off"
+                    placeholder="同收件用户名"
+                    onChange={(e) => patch({ smtpUsername: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="ac-smtp-pass">
+                  密码 / 授权码
+                </label>
+                <input
+                  id="ac-smtp-pass"
+                  className="input"
+                  type="password"
+                  value={draft.smtpPassword}
+                  disabled={busy}
+                  autoComplete="new-password"
+                  placeholder={isEdit ? "保持不变" : "留空则与收件密码相同"}
+                  onChange={(e) => patch({ smtpPassword: e.target.value })}
+                />
+                <p className="field-hint">绝大多数邮箱的收发件密码相同，留空即可。</p>
+              </div>
+            </>
+          )}
+        </Group>
 
         {error && (
           <p className="set-error" role="alert">
@@ -641,7 +646,11 @@ export function AccountForm({
           {testing ? "测试中…" : "测试连接"}
         </button>
         <button type="submit" className="btn btn-primary" disabled={busy}>
-          <Icon name={saving ? "loader" : "check"} size={15} className={saving ? "set-spin" : undefined} />
+          <Icon
+            name={saving ? "loader" : "check"}
+            size={15}
+            className={saving ? "set-spin" : undefined}
+          />
           {saving ? "保存中…" : "保存"}
         </button>
       </footer>
@@ -649,7 +658,7 @@ export function AccountForm({
   );
 }
 
-/** One provider chip; 自定义 carries no server data and just releases control. */
+/** One provider tile; 自定义 carries no server data and just releases control. */
 function PresetChip({
   preset,
   active,
@@ -662,11 +671,14 @@ function PresetChip({
   return (
     <button
       type="button"
-      className={`set-chip${active ? " active" : ""}`}
+      className={`set-choice${active ? " active" : ""}`}
       aria-pressed={active}
       onClick={onPick}
     >
-      {preset.name}
+      <span className="set-choice-icon">
+        <Icon name={preset.id === CUSTOM_PRESET ? "settings" : "mail"} size={15} />
+      </span>
+      <span className="set-choice-label">{preset.name}</span>
     </button>
   );
 }

@@ -12,6 +12,7 @@ import type { Category, ChannelKind, NotifyChannel } from "../../lib/types";
 import { CATEGORY_LABEL } from "../../lib/types";
 import { Icon } from "../Icon";
 import { KIND_META, KINDS } from "./channelKinds";
+import { Group } from "./parts";
 
 /** Category order used everywhere in the UI, most actionable first. */
 const CATEGORIES: Category[] = ["verification", "important", "normal", "spam"];
@@ -209,6 +210,9 @@ export function ChannelForm({
       }}
     >
       <header className="set-section-head">
+        <span className="set-section-mark">
+          <Icon name="bell" size={15} />
+        </span>
         <div className="set-section-text">
           <h2 className="set-section-title">{isEdit ? "编辑渠道" : "添加通知渠道"}</h2>
           <p className="set-section-sub">
@@ -230,18 +234,20 @@ export function ChannelForm({
       <div className="set-section-body">
         <div className="field">
           <span className="field-label">渠道类型</span>
-          <div className="set-chips">
+          <div className="set-choices">
             {KINDS.map((kind) => (
               <button
                 key={kind}
                 type="button"
-                className={`set-chip${draft.kind === kind ? " active" : ""}`}
+                className={`set-choice${draft.kind === kind ? " active" : ""}`}
                 aria-pressed={draft.kind === kind}
                 disabled={saving}
                 onClick={() => patch({ kind })}
               >
-                <Icon name={KIND_META[kind].icon} size={14} />
-                {KIND_META[kind].label}
+                <span className="set-choice-icon">
+                  <Icon name={KIND_META[kind].icon} size={15} />
+                </span>
+                <span className="set-choice-label">{KIND_META[kind].label}</span>
               </button>
             ))}
           </div>
@@ -266,8 +272,10 @@ export function ChannelForm({
         </div>
 
         {/* -- categories ---------------------------------------------------- */}
-        <div className="field">
-          <span className="field-label">推送以下类别的邮件</span>
+        <Group
+          title="推送范围"
+          hint="默认只推送「重要」。验证码类邮件同时会在应用内弹窗提醒。"
+        >
           <div className="set-cats">
             {CATEGORIES.map((c) => {
               const on = draft.notifyCategories.includes(c);
@@ -280,283 +288,282 @@ export function ChannelForm({
                   disabled={saving}
                   onClick={() => toggleCategory(c)}
                 >
-                  <Icon name={on ? "check" : "plus"} size={13} />
+                  <span className="set-cat-dot">
+                    <Icon name="check" size={11} strokeWidth={2.6} />
+                  </span>
                   {CATEGORY_LABEL[c]}
                 </button>
               );
             })}
           </div>
-          <p className="field-hint">
-            默认只推送「重要」。验证码类邮件同时会在应用内弹窗提醒。
-          </p>
-        </div>
-
-        <div className="set-divider" />
+        </Group>
 
         {/* -- kind-specific fields ------------------------------------------ */}
-        {draft.kind === "telegram" && (
-          <>
-            <div className="set-grid">
-              <div className="field">
-                <label className="field-label" htmlFor="ch-token">
-                  Bot Token
-                </label>
-                <input
-                  id="ch-token"
-                  className="input set-mono"
-                  value={draft.cfg.botToken ?? ""}
-                  disabled={saving}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="123456789:AA…"
-                  onChange={(e) => setCfg("botToken", e.target.value)}
-                />
-              </div>
-              <div className="field">
-                <label className="field-label" htmlFor="ch-chat">
-                  Chat ID
-                </label>
-                <input
-                  id="ch-chat"
-                  className="input set-mono"
-                  value={draft.cfg.chatId ?? ""}
-                  disabled={saving}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="123456789 或 @channel"
-                  onChange={(e) => setCfg("chatId", e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="field">
-              <label className="field-label" htmlFor="ch-tg-base">
-                接口地址（可选）
-              </label>
-              <input
-                id="ch-tg-base"
-                className="input set-mono"
-                value={draft.cfg.apiBase ?? ""}
-                disabled={saving}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="https://api.telegram.org"
-                onChange={(e) => setCfg("apiBase", e.target.value)}
-              />
-              <p className="field-hint">留空使用官方地址；网络受限时可填写自建反代。</p>
-            </div>
-          </>
-        )}
-
-        {draft.kind === "qqbot" && (
-          <>
-            <div className="field">
-              <label className="field-label" htmlFor="ch-qq-base">
-                HTTP 接口地址
-              </label>
-              <input
-                id="ch-qq-base"
-                className="input set-mono"
-                value={draft.cfg.apiBase ?? ""}
-                disabled={saving}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="http://127.0.0.1:5700"
-                onChange={(e) => setCfg("apiBase", e.target.value)}
-              />
-            </div>
-            <div className="set-grid">
-              <div className="field">
-                <label className="field-label" htmlFor="ch-qq-kind">
-                  发送到
-                </label>
-                <select
-                  id="ch-qq-kind"
-                  className="select"
-                  value={draft.cfg.targetKind ?? "private"}
-                  disabled={saving}
-                  onChange={(e) => setCfg("targetKind", e.target.value)}
-                >
-                  <option value="private">私聊</option>
-                  <option value="group">群聊</option>
-                </select>
-              </div>
-              <div className="field">
-                <label className="field-label" htmlFor="ch-qq-id">
-                  {draft.cfg.targetKind === "group" ? "群号" : "QQ 号"}
-                </label>
-                <input
-                  id="ch-qq-id"
-                  className="input set-mono"
-                  value={draft.cfg.targetId ?? ""}
-                  disabled={saving}
-                  inputMode="numeric"
-                  autoComplete="off"
-                  placeholder="10001"
-                  onChange={(e) => setCfg("targetId", e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="field">
-              <label className="field-label" htmlFor="ch-qq-token">
-                Access Token（可选）
-              </label>
-              <input
-                id="ch-qq-token"
-                className="input set-mono"
-                value={draft.cfg.accessToken ?? ""}
-                disabled={saving}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="与 OneBot 服务配置一致"
-                onChange={(e) => setCfg("accessToken", e.target.value)}
-              />
-            </div>
-          </>
-        )}
-
-        {draft.kind === "bark" && (
-          <div className="set-grid">
-            <div className="field">
-              <label className="field-label" htmlFor="ch-bark-key">
-                设备 Key
-              </label>
-              <input
-                id="ch-bark-key"
-                className="input set-mono"
-                value={draft.cfg.deviceKey ?? ""}
-                disabled={saving}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="Bark App 首页复制"
-                onChange={(e) => setCfg("deviceKey", e.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label className="field-label" htmlFor="ch-bark-server">
-                服务器地址（可选）
-              </label>
-              <input
-                id="ch-bark-server"
-                className="input set-mono"
-                value={draft.cfg.server ?? ""}
-                disabled={saving}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="https://api.day.app"
-                onChange={(e) => setCfg("server", e.target.value)}
-              />
-            </div>
-          </div>
-        )}
-
-        {draft.kind === "webhook" && (
-          <>
-            <div className="field">
-              <label className="field-label" htmlFor="ch-url">
-                请求地址
-              </label>
-              <input
-                id="ch-url"
-                className="input set-mono"
-                value={draft.cfg.url ?? ""}
-                disabled={saving}
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="https://example.com/hook"
-                onChange={(e) => setCfg("url", e.target.value)}
-              />
-            </div>
-
-            <div className="field">
-              <span className="field-label">自定义请求头（可选）</span>
-              {draft.headers.map((row, i) => (
-                <div key={i} className="set-hdr-row">
+        <Group title={`${meta.label} 参数`}>
+          {draft.kind === "telegram" && (
+            <>
+              <div className="set-grid">
+                <div className="field">
+                  <label className="field-label" htmlFor="ch-token">
+                    Bot Token
+                  </label>
                   <input
+                    id="ch-token"
                     className="input set-mono"
-                    value={row.key}
+                    value={draft.cfg.botToken ?? ""}
                     disabled={saving}
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder="Authorization"
-                    aria-label="请求头名称"
-                    onChange={(e) =>
-                      patch({
-                        headers: draft.headers.map((h, j) =>
-                          j === i ? { ...h, key: e.target.value } : h,
-                        ),
-                      })
-                    }
+                    placeholder="123456789:AA…"
+                    onChange={(e) => setCfg("botToken", e.target.value)}
                   />
-                  <input
-                    className="input set-mono"
-                    value={row.value}
-                    disabled={saving}
-                    autoComplete="off"
-                    spellCheck={false}
-                    placeholder="Bearer …"
-                    aria-label="请求头内容"
-                    onChange={(e) =>
-                      patch({
-                        headers: draft.headers.map((h, j) =>
-                          j === i ? { ...h, value: e.target.value } : h,
-                        ),
-                      })
-                    }
-                  />
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    disabled={saving}
-                    title="删除该请求头"
-                    aria-label="删除该请求头"
-                    onClick={() =>
-                      patch({ headers: draft.headers.filter((_, j) => j !== i) })
-                    }
-                  >
-                    <Icon name="x" size={15} />
-                  </button>
                 </div>
-              ))}
-              <button
-                type="button"
-                className="btn btn-sm set-add-hdr"
-                disabled={saving}
-                onClick={() =>
-                  patch({ headers: [...draft.headers, { key: "", value: "" }] })
-                }
-              >
-                <Icon name="plus" size={14} />
-                添加请求头
-              </button>
-            </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="ch-chat">
+                    Chat ID
+                  </label>
+                  <input
+                    id="ch-chat"
+                    className="input set-mono"
+                    value={draft.cfg.chatId ?? ""}
+                    disabled={saving}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="123456789 或 @channel"
+                    onChange={(e) => setCfg("chatId", e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="ch-tg-base">
+                  接口地址（可选）
+                </label>
+                <input
+                  id="ch-tg-base"
+                  className="input set-mono"
+                  value={draft.cfg.apiBase ?? ""}
+                  disabled={saving}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="https://api.telegram.org"
+                  onChange={(e) => setCfg("apiBase", e.target.value)}
+                />
+                <p className="field-hint">留空使用官方地址；网络受限时可填写自建反代。</p>
+              </div>
+            </>
+          )}
 
-            <div className="field">
-              <label className="field-label" htmlFor="ch-body">
-                请求体模板（可选）
-              </label>
-              <textarea
-                id="ch-body"
-                className="textarea set-mono"
-                value={draft.cfg.bodyTemplate ?? ""}
-                disabled={saving}
-                spellCheck={false}
-                placeholder={'{"text": "{{subject}} — {{summary}}"}'}
-                onChange={(e) => setCfg("bodyTemplate", e.target.value)}
-              />
-              <p className="field-hint">
-                留空则发送完整 JSON 事件。可用占位符：
-                <code className="set-code">{"{{category}}"}</code>
-                <code className="set-code">{"{{subject}}"}</code>
-                <code className="set-code">{"{{from}}"}</code>
-                <code className="set-code">{"{{summary}}"}</code>
-                <code className="set-code">{"{{code}}"}</code>
-                <code className="set-code">{"{{account}}"}</code>
-                <code className="set-code">{"{{date}}"}</code>
-                模板是合法 JSON 时按 JSON 发送，否则按纯文本发送。
-              </p>
+          {draft.kind === "qqbot" && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="ch-qq-base">
+                  HTTP 接口地址
+                </label>
+                <input
+                  id="ch-qq-base"
+                  className="input set-mono"
+                  value={draft.cfg.apiBase ?? ""}
+                  disabled={saving}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="http://127.0.0.1:5700"
+                  onChange={(e) => setCfg("apiBase", e.target.value)}
+                />
+              </div>
+              <div className="set-grid">
+                <div className="field">
+                  <label className="field-label" htmlFor="ch-qq-kind">
+                    发送到
+                  </label>
+                  <select
+                    id="ch-qq-kind"
+                    className="select"
+                    value={draft.cfg.targetKind ?? "private"}
+                    disabled={saving}
+                    onChange={(e) => setCfg("targetKind", e.target.value)}
+                  >
+                    <option value="private">私聊</option>
+                    <option value="group">群聊</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label className="field-label" htmlFor="ch-qq-id">
+                    {draft.cfg.targetKind === "group" ? "群号" : "QQ 号"}
+                  </label>
+                  <input
+                    id="ch-qq-id"
+                    className="input set-mono"
+                    value={draft.cfg.targetId ?? ""}
+                    disabled={saving}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    placeholder="10001"
+                    onChange={(e) => setCfg("targetId", e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="ch-qq-token">
+                  Access Token（可选）
+                </label>
+                <input
+                  id="ch-qq-token"
+                  className="input set-mono"
+                  value={draft.cfg.accessToken ?? ""}
+                  disabled={saving}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="与 OneBot 服务配置一致"
+                  onChange={(e) => setCfg("accessToken", e.target.value)}
+                />
+              </div>
+            </>
+          )}
+
+          {draft.kind === "bark" && (
+            <div className="set-grid">
+              <div className="field">
+                <label className="field-label" htmlFor="ch-bark-key">
+                  设备 Key
+                </label>
+                <input
+                  id="ch-bark-key"
+                  className="input set-mono"
+                  value={draft.cfg.deviceKey ?? ""}
+                  disabled={saving}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Bark App 首页复制"
+                  onChange={(e) => setCfg("deviceKey", e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="ch-bark-server">
+                  服务器地址（可选）
+                </label>
+                <input
+                  id="ch-bark-server"
+                  className="input set-mono"
+                  value={draft.cfg.server ?? ""}
+                  disabled={saving}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="https://api.day.app"
+                  onChange={(e) => setCfg("server", e.target.value)}
+                />
+              </div>
             </div>
-          </>
-        )}
+          )}
+
+          {draft.kind === "webhook" && (
+            <>
+              <div className="field">
+                <label className="field-label" htmlFor="ch-url">
+                  请求地址
+                </label>
+                <input
+                  id="ch-url"
+                  className="input set-mono"
+                  value={draft.cfg.url ?? ""}
+                  disabled={saving}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="https://example.com/hook"
+                  onChange={(e) => setCfg("url", e.target.value)}
+                />
+              </div>
+
+              <div className="field">
+                <span className="field-label">自定义请求头（可选）</span>
+                {draft.headers.map((row, i) => (
+                  <div key={i} className="set-hdr-row">
+                    <input
+                      className="input set-mono"
+                      value={row.key}
+                      disabled={saving}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="Authorization"
+                      aria-label="请求头名称"
+                      onChange={(e) =>
+                        patch({
+                          headers: draft.headers.map((h, j) =>
+                            j === i ? { ...h, key: e.target.value } : h,
+                          ),
+                        })
+                      }
+                    />
+                    <input
+                      className="input set-mono"
+                      value={row.value}
+                      disabled={saving}
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="Bearer …"
+                      aria-label="请求头内容"
+                      onChange={(e) =>
+                        patch({
+                          headers: draft.headers.map((h, j) =>
+                            j === i ? { ...h, value: e.target.value } : h,
+                          ),
+                        })
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      disabled={saving}
+                      title="删除该请求头"
+                      aria-label="删除该请求头"
+                      onClick={() =>
+                        patch({ headers: draft.headers.filter((_, j) => j !== i) })
+                      }
+                    >
+                      <Icon name="x" size={15} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="btn btn-sm set-add-hdr"
+                  disabled={saving}
+                  onClick={() =>
+                    patch({ headers: [...draft.headers, { key: "", value: "" }] })
+                  }
+                >
+                  <Icon name="plus" size={14} />
+                  添加请求头
+                </button>
+              </div>
+
+              <div className="field">
+                <label className="field-label" htmlFor="ch-body">
+                  请求体模板（可选）
+                </label>
+                <textarea
+                  id="ch-body"
+                  className="textarea set-mono"
+                  value={draft.cfg.bodyTemplate ?? ""}
+                  disabled={saving}
+                  spellCheck={false}
+                  placeholder={'{"text": "{{subject}} — {{summary}}"}'}
+                  onChange={(e) => setCfg("bodyTemplate", e.target.value)}
+                />
+                <p className="field-hint">
+                  留空则发送完整 JSON 事件。可用占位符：
+                  <code className="set-code">{"{{category}}"}</code>
+                  <code className="set-code">{"{{subject}}"}</code>
+                  <code className="set-code">{"{{from}}"}</code>
+                  <code className="set-code">{"{{summary}}"}</code>
+                  <code className="set-code">{"{{code}}"}</code>
+                  <code className="set-code">{"{{account}}"}</code>
+                  <code className="set-code">{"{{date}}"}</code>
+                  模板是合法 JSON 时按 JSON 发送，否则按纯文本发送。
+                </p>
+              </div>
+            </>
+          )}
+        </Group>
 
         {error && (
           <p className="set-error" role="alert">

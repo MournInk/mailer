@@ -12,7 +12,7 @@ import * as api from "../../lib/api";
 import { useApp } from "../../lib/store";
 import type { AiSettingsPublic, TestResult } from "../../lib/types";
 import { Icon } from "../Icon";
-import { Section, SwitchField, TestOutput } from "./parts";
+import { Group, Section, SwitchField, TestOutput } from "./parts";
 
 /** Endpoint shortcuts: base URL + a model that is cheap and fast enough. */
 const ENDPOINT_PRESETS: Array<{ name: string; apiBase: string; model: string }> = [
@@ -70,7 +70,7 @@ export function AiTab() {
 
   if (loadError) {
     return (
-      <Section title="AI 过滤器">
+      <Section title="AI 过滤器" icon="spark">
         <p className="set-error" role="alert">
           <Icon name="alert" size={14} />
           <span>读取设置失败：{loadError}</span>
@@ -80,7 +80,7 @@ export function AiTab() {
   }
   if (!draft || !stored) {
     return (
-      <Section title="AI 过滤器">
+      <Section title="AI 过滤器" icon="spark">
         <p className="set-loading">
           <Icon name="loader" size={15} className="set-spin" />
           正在读取设置…
@@ -132,6 +132,7 @@ export function AiTab() {
     <>
       <Section
         title="AI 过滤器"
+        icon="spark"
         sub="每封新邮件会发送标题、发件人与正文摘要给模型，用于判断类别、提取验证码并生成摘要。"
       >
         <SwitchField
@@ -143,21 +144,28 @@ export function AiTab() {
         />
       </Section>
 
-      <Section title="模型接口" sub="兼容 OpenAI Chat Completions 协议的任意服务。">
+      <Section
+        title="模型接口"
+        icon="bot"
+        sub="兼容 OpenAI Chat Completions 协议的任意服务。"
+      >
         <div className="field">
           <span className="field-label">快速填充</span>
-          <div className="set-chips">
+          <div className="set-choices">
             {ENDPOINT_PRESETS.map((p) => (
               <button
                 key={p.name}
                 type="button"
-                className={`set-chip${
+                className={`set-choice${
                   draft.apiBase.trim().replace(/\/+$/, "") === p.apiBase ? " active" : ""
                 }`}
                 disabled={busy}
                 onClick={() => patch({ apiBase: p.apiBase, model: p.model })}
               >
-                {p.name}
+                <span className="set-choice-icon">
+                  <Icon name="link" size={15} />
+                </span>
+                <span className="set-choice-label">{p.name}</span>
               </button>
             ))}
           </div>
@@ -221,27 +229,30 @@ export function AiTab() {
           </div>
         </div>
 
-        <div className="field">
-          <label className="field-label" htmlFor="ai-temp">
-            温度 <span className="set-range-value">{draft.temperature.toFixed(2)}</span>
-          </label>
-          <input
-            id="ai-temp"
-            className="set-range"
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={draft.temperature}
-            disabled={busy}
-            onChange={(e) => patch({ temperature: Number(e.target.value) })}
-          />
-          <p className="field-hint">分类需要稳定输出，建议保持在 0.2 以下。</p>
-        </div>
+        <Group title="生成参数" hint="分类需要稳定输出，温度越低结果越一致。">
+          <div className="field">
+            <label className="field-label" htmlFor="ai-temp">
+              温度 <span className="set-range-value">{draft.temperature.toFixed(2)}</span>
+            </label>
+            <input
+              id="ai-temp"
+              className="set-range"
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={draft.temperature}
+              disabled={busy}
+              onChange={(e) => patch({ temperature: Number(e.target.value) })}
+            />
+            <p className="field-hint">分类需要稳定输出，建议保持在 0.2 以下。</p>
+          </div>
+        </Group>
       </Section>
 
       <Section
         title="分类偏好"
+        icon="filter"
         sub="用一句话描述你的判断标准，模型会在分类时一并参考。"
       >
         <div className="field">
@@ -258,10 +269,12 @@ export function AiTab() {
           />
         </div>
 
-        <div className="set-warn">
+        <div className={`set-warn${draft.autoDeleteSpam ? " armed" : ""}`}>
           <div className="set-warn-head">
-            <Icon name="alert" size={15} />
-            <span>自动删除垃圾邮件</span>
+            <span className="set-warn-mark">
+              <Icon name="trash" size={14} />
+            </span>
+            <span className="set-warn-title">自动删除垃圾邮件</span>
             <button
               type="button"
               className={`switch${draft.autoDeleteSpam ? " on" : ""}`}

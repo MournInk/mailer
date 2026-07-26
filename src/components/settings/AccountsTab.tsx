@@ -84,6 +84,9 @@ export function AccountsTab() {
 
       {accounts.length === 0 && (
         <div className="card set-empty">
+          <span className="set-empty-mark">
+            <Icon name="mail" size={18} />
+          </span>
           <span className="set-empty-title">还没有邮箱账户</span>
           <p className="set-empty-body">
             添加第一个邮箱后，Mailer 会立即开始收信并交给 AI 分类。

@@ -13,6 +13,7 @@ import { CATEGORY_LABEL, type NotifyChannel, type TestResult } from "../../lib/t
 import { Icon } from "../Icon";
 import { ChannelForm } from "./ChannelForm";
 import { KIND_META } from "./channelKinds";
+import { TestOutput } from "./parts";
 
 /** null = list only; { channel: null } = add form; { channel } = edit form. */
 type Editing = { channel: NotifyChannel | null } | null;
@@ -134,6 +135,9 @@ export function ChannelsTab() {
 
       {!loading && channels.length === 0 && (
         <div className="card set-empty">
+          <span className="set-empty-mark">
+            <Icon name="bell" size={18} />
+          </span>
           <span className="set-empty-title">还没有通知渠道</span>
           <p className="set-empty-body">
             添加 Telegram、QQ 机器人、Bark 或自定义 Webhook，
@@ -216,12 +220,7 @@ export function ChannelsTab() {
                 </button>
               </div>
 
-              {tested?.id === c.id && (
-                <div className={`set-test${tested.result.ok ? " ok" : " bad"}`} role="status">
-                  <Icon name={tested.result.ok ? "check" : "alert"} size={15} />
-                  <pre className="set-test-text">{tested.result.message}</pre>
-                </div>
-              )}
+              {tested?.id === c.id && <TestOutput result={tested.result} />}
 
               {confirmId === c.id && (
                 <div className="set-confirm" role="alertdialog">

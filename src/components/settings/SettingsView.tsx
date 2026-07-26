@@ -71,7 +71,9 @@ export function SettingsView() {
             aria-current={settingsTab === t.key ? "page" : undefined}
             onClick={() => openSettings(t.key)}
           >
-            <Icon name={t.icon} size={16} />
+            <span className="set-tab-icon">
+              <Icon name={t.icon} size={16} />
+            </span>
             <span className="set-tab-label">{t.label}</span>
           </button>
         ))}
@@ -84,12 +86,13 @@ export function SettingsView() {
             <p className="set-subtitle">{active.sub}</p>
           </div>
           <button
-            className="icon-btn"
+            className="btn btn-ghost set-close"
             onClick={closeSettings}
             title="返回邮件（Esc）"
             aria-label="关闭设置"
           >
-            <Icon name="x" size={17} />
+            <Icon name="back" size={16} />
+            <span className="set-close-label">返回邮件</span>
           </button>
         </header>
 

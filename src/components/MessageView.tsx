@@ -381,7 +381,7 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
           {/* -- remote image gate ------------------------------------------- */}
           {body && body.blocked > 0 && !showImages && (
-            <div className="mv-imgbar">
+            <div className="card mv-imgbar">
               <span className="mv-imgbar-chip" aria-hidden="true">
                 <Icon name="shield" size={16} />
               </span>
@@ -547,7 +547,7 @@ function DeleteControl({ onDelete }: { onDelete: (onServer: boolean) => void }) 
 /** Attachments are metadata only — there is no download command yet. */
 function AttachmentRow({ att }: { att: AttachmentMeta }) {
   return (
-    <div className="mv-att" title={att.mime}>
+    <div className="card mv-att" title={att.mime}>
       <span className="mv-att-chip" aria-hidden="true">
         <Icon name="paperclip" size={15} />
       </span>

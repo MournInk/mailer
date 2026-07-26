@@ -29,7 +29,7 @@ export function AboutTab() {
     <>
       <section className="card set-section set-about">
         <span className="set-about-mark">
-          <Icon name="mail" size={20} />
+          <Icon name="mail" size={21} />
         </span>
         <h2 className="set-about-name">Mailer</h2>
         <p className="set-about-version">版本 {VERSION}</p>
@@ -40,7 +40,11 @@ export function AboutTab() {
         </p>
       </section>
 
-      <Section title="外观" sub="深色模式跟随系统时会随日出日落自动切换。">
+      <Section
+        title="外观"
+        icon="monitor"
+        sub="深色模式跟随系统时会随日出日落自动切换。"
+      >
         <div className="set-seg" role="radiogroup" aria-label="主题">
           {THEMES.map((t) => (
             <button
@@ -58,7 +62,7 @@ export function AboutTab() {
         </div>
       </Section>
 
-      <Section title="技术栈">
+      <Section title="技术栈" icon="code">
         <dl className="set-kv">
           {STACK.map((row) => (
             <div key={row.label} className="set-kv-row">
@@ -69,7 +73,7 @@ export function AboutTab() {
         </dl>
       </Section>
 
-      <Section title="隐私">
+      <Section title="隐私" icon="shield">
         <p className="set-note">
           <Icon name="shield" size={15} />
           <span>
@@ -79,6 +83,12 @@ export function AboutTab() {
           </span>
         </p>
       </Section>
+
+      <p className="set-colophon">
+        Mailer · 本地优先的邮件客户端
+        <br />
+        邮件、密钥与配置都留在这台设备上。
+      </p>
     </>
   );
 }

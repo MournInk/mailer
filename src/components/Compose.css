@@ -1,4 +1,6 @@
-/* Compose modal — a single sheet floating over the app, blurred paper behind. */
+/* Compose modal — the onboarding card, floated over the app on blurred paper.
+   Same vocabulary as the first-run screen: one warm wash, one serif line, an
+   accent-tinted chip, a hairline card, and field rhythm you can feel. */
 
 .cp-backdrop {
   position: fixed;
@@ -12,110 +14,256 @@
   background: color-mix(in srgb, var(--bg) 62%, transparent);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
+  animation: cp-fade var(--dur-base) var(--ease-out) both;
 }
 
-.cp-modal {
+@keyframes cp-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* two classes so the radius and shadow beat `.card` from base.css regardless of
+   the order the bundler injects the stylesheets in */
+.cp-backdrop .cp-modal {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: min(620px, 100%);
   max-height: min(86vh, 760px);
   min-width: 0;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
   /* the shell disables selection app-wide; a draft needs it back */
   user-select: text;
+  -webkit-user-select: text;
+  overflow: hidden;
+}
+
+/* the onboarding halo, clipped to the top of the sheet */
+.cp-modal::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 180px;
+  pointer-events: none;
+  background: radial-gradient(
+    100% 78% at 50% 0%,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    transparent 72%
+  );
 }
 
 /* -- head ------------------------------------------------------------------ */
 
 .cp-head {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 12px;
   flex-shrink: 0;
-  padding: 13px 12px 13px 18px;
+  padding: 18px 14px 16px 20px;
   border-bottom: 1px solid var(--line);
 }
 
-.cp-title {
+.cp-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+}
+
+.cp-headings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   flex: 1;
+  min-width: 0;
+  /* optically centre the serif line against the chip */
+  padding-top: 1px;
+}
+
+.cp-title {
   min-width: 0;
   font-family: var(--font-display);
   font-size: var(--text-lg);
   font-weight: 500;
+  line-height: 1.25;
   letter-spacing: -0.01em;
   color: var(--ink);
 }
 
+.cp-sub {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.cp-head .cp-close {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 /* -- fields ---------------------------------------------------------------- */
 
+/* Related things close, unrelated things far: the four fields sit on an even
+   18px rhythm and the notices break it deliberately. */
 .cp-body {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 18px 18px;
+  gap: 18px;
+  padding: 20px 20px 22px;
 }
 
-.cp-mono {
+.cp-body .input,
+.cp-body .select,
+.cp-body .textarea {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+.cp-body .input:hover:not(:disabled),
+.cp-body .select:hover:not(:disabled),
+.cp-body .textarea:hover:not(:disabled) {
+  border-color: var(--ink-faint);
+}
+.cp-body .input:disabled,
+.cp-body .select:disabled,
+.cp-body .textarea:disabled {
+  background: var(--surface-2);
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+.cp-body .cp-mono {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
 }
 
+/* The no-SMTP state has to be readable, not merely tinted: a full notice block
+   in the warn ramp with the copy in the ink ramp so it stays legible. */
+.cp-warn,
+.cp-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.cp-warn > svg,
+.cp-error > svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+
 .cp-warn {
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+  background: var(--warn-soft);
+  color: var(--ink);
+}
+.cp-warn > svg {
   color: var(--warn);
 }
 
-.cp-textarea {
+.cp-error {
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.cp-body .cp-textarea {
   min-height: 180px;
   /* grown to fit by the component; this caps it before the modal overflows */
   max-height: 46vh;
   overflow-y: auto;
   resize: none;
-}
-
-.cp-error {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-  border-radius: var(--radius-md);
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-.cp-error > svg {
-  flex-shrink: 0;
-  margin-top: 2px;
+  padding: 11px 13px;
+  font-size: var(--text-md);
+  line-height: 1.7;
 }
 
 /* -- foot ------------------------------------------------------------------ */
 
 .cp-foot {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
-  padding: 12px 18px;
+  padding: 14px 20px;
   border-top: 1px solid var(--line);
   background: var(--bg-raised);
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 }
 
 .cp-shortcut {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   flex: 1;
   min-width: 0;
   font-size: var(--text-xs);
   color: var(--ink-3);
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.cp-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+}
+
+.cp-shortcut-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the send affordance outweighs everything else on the row */
+.cp-foot .cp-send {
+  height: 38px;
+  padding: 0 20px;
+  font-size: var(--text-md);
+}
+.cp-foot .cp-cancel {
+  height: 38px;
+}
+/* A disabled primary must still read as the send button rather than a grey
+   slab — and the no-SMTP case is the one a user will actually meet, so it keeps
+   full-strength text on the accent tint instead of a 50% wash. */
+.cp-foot .cp-send:disabled {
+  opacity: 1;
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--accent-soft-ink);
+  box-shadow: none;
 }
 
 @keyframes cp-spin {
@@ -134,19 +282,47 @@
     padding: 0;
     align-items: stretch;
   }
-  .cp-modal {
+  .cp-backdrop .cp-modal {
     width: 100%;
     max-height: 100%;
     border: none;
     border-radius: 0;
   }
+  .cp-head {
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 12px 14px 16px;
+  }
+  .cp-body {
+    padding: 18px 16px 20px;
+  }
   .cp-foot {
-    border-radius: 0;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
   }
   .cp-shortcut {
     display: none;
   }
-  .cp-textarea {
+  .cp-body .cp-textarea {
     max-height: none;
+  }
+  /* two full-width thumb targets read better than a right-aligned pair */
+  .cp-foot .cp-cancel,
+  .cp-foot .cp-send {
+    flex: 1;
+  }
+}
+
+/* -- touch ------------------------------------------------------------------ */
+
+@media (pointer: coarse) {
+  .cp-body .input,
+  .cp-body .select {
+    height: 44px;
+  }
+  .cp-head .cp-close {
+    width: 40px;
+    height: 40px;
+  }
+  .cp-foot .cp-cancel,
+  .cp-foot .cp-send {
+    height: 44px;
   }
 }
