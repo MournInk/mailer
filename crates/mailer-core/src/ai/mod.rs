@@ -222,6 +222,10 @@ async fn chat(
         .text()
         .await
         .map_err(|e| Error::Ai(format!("读取 AI 响应失败: {}", e.without_url())))?;
+    // Some providers quote the submitted key back at you — OpenAI does it in
+    // 401 bodies. Everything downstream of here may end up in an error string,
+    // a toast or a log line, so the key is removed before any of that.
+    let text = scrub_key(&text, settings.api_key.trim());
 
     if !status.is_success() {
         // The body is the only thing that tells the user *why* (wrong key,
@@ -234,6 +238,19 @@ async fn chat(
     }
 
     w.extract(&text)
+}
+
+/// Replace any literal occurrence of the configured key with a marker.
+///
+/// Short keys are left alone: a two-character "key" would match half the
+/// alphabet in a normal response body and mangle it into unreadability, and
+/// nothing that short is a real credential worth protecting.
+fn scrub_key(body: &str, key: &str) -> String {
+    const MIN_SECRET: usize = 8;
+    if key.len() < MIN_SECRET || !body.contains(key) {
+        return body.to_string();
+    }
+    body.replace(key, "***")
 }
 
 /// The system text as the provider will see it.
@@ -727,6 +744,31 @@ mod tests {
         let out = body_for_prompt(&msg_with(Some(&body), None));
         assert!(out.ends_with("[... truncated]"), "missing marker: {}", &out[out.len() - 40..]);
         assert_eq!(out.chars().filter(|c| *c == '验').count(), MAX_BODY_CHARS);
+    }
+
+    /// OpenAI echoes the submitted key inside 401 bodies. That body becomes an
+    /// error string the user sees and the logs keep, so the key must not
+    /// survive the trip.
+    #[test]
+    fn an_echoed_key_never_reaches_an_error_string() {
+        let key = "sk-proj-abcdef1234567890";
+        let body = format!(
+            r#"{{"error":{{"message":"Incorrect API key provided: {key}. Check your key."}}}}"#
+        );
+        let cleaned = scrub_key(&body, key);
+        assert!(!cleaned.contains(key), "{cleaned}");
+        assert!(cleaned.contains("***"));
+        // The rest of the message is what makes the failure diagnosable.
+        assert!(cleaned.contains("Incorrect API key provided"));
+    }
+
+    /// A key too short to be a credential would match ordinary prose and
+    /// shred the very message the user needs to read.
+    #[test]
+    fn a_short_key_does_not_shred_the_body() {
+        let body = "model not found: gpt-4o";
+        assert_eq!(scrub_key(body, "gpt"), body);
+        assert_eq!(scrub_key(body, ""), body);
     }
 
     #[test]
