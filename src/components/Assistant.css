@@ -544,39 +544,86 @@
 
 .asst-composer {
   flex: 0 0 auto;
-  display: flex;
-  gap: 8px;
-  align-items: flex-end;
   padding: 10px 12px 12px;
   border-top: 1px solid var(--line);
   background: var(--bg-raised);
 }
 
-.asst-input {
-  flex: 1;
-  min-width: 0;
-  resize: none;
-  padding: 9px 11px;
-  border-radius: var(--radius-md);
+/* The field is the box; the textarea inside it is borderless and grows. The
+   button sits in the bottom-right corner of the same box, so a long question
+   pushes the box up rather than pushing the button out of reach. */
+.asst-field {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 7px 7px 7px 12px;
+  border-radius: 20px;
   border: 1px solid var(--line-strong);
   background: var(--surface);
-  font-size: var(--text-base);
-  line-height: 1.5;
   transition: border-color var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out);
 }
 
-.asst-input:focus {
-  outline: none;
+/* Focus lands on the textarea; the ring belongs to the box around it. */
+.asst-field:focus-within {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
 
+.asst-input {
+  flex: 1;
+  min-width: 0;
+  /* Sized by the effect in `Assistant.tsx`, capped here so a pasted essay
+     scrolls instead of swallowing the conversation. */
+  max-height: 168px;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  resize: none;
+  font-size: var(--text-base);
+  line-height: 1.55;
+  color: var(--ink);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.asst-input::-webkit-scrollbar {
+  width: 0;
+}
+
+/* The ring belongs to the box, not to the textarea inside it. base.css puts one
+   on anything `:focus-visible`, which drew a second rounded rectangle 3px inside
+   the field — visible as a box within a box. */
+.asst-input:focus,
+.asst-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 .asst-send {
-  height: 38px;
-  width: 40px;
-  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  transition: background var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+.asst-send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+/* Nothing to send: present, so the box does not reflow when you start typing,
+   but plainly inert. */
+.asst-send:disabled {
+  background: var(--surface-2);
+  color: var(--ink-faint);
+  cursor: default;
 }
 
 /* Phones and very narrow windows: the corner card becomes the screen. */
@@ -608,9 +655,10 @@
   .asst-starter {
     min-height: 44px;
   }
+  /* A 30px circle is a poor touch target; the field grows with it. */
   .asst-send {
-    height: 44px;
-    width: 46px;
+    width: 38px;
+    height: 38px;
   }
 }
 

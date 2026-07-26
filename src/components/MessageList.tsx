@@ -269,8 +269,12 @@ export function MessageList() {
         },
         SEP,
         {
+          // Same meaning as the button in the reading pane and the one in the
+          // selection bar: gone here and gone on the server. The label says so,
+          // because a "删除" that only hid the mail locally is what the old
+          // dropdown offered and nobody should have to remember which is which.
           id: "delete",
-          label: many ? `删除 ${target.length} 封` : "删除",
+          label: many ? `删除 ${target.length} 封（含服务器）` : "删除（含服务器）",
           icon: "trash",
           danger: true,
           run: async () => {

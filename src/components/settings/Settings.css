@@ -170,9 +170,11 @@
   color: var(--ink);
 }
 
-/* Sizing and overflow belong to `OverlayScroll`. */
+/* Sizing and overflow belong to `OverlayScroll`. The top padding is the gap
+   between the header rule and the first card, and it has to be the same 18px the
+   cards use between themselves — at 0 the first card welds itself to the rule. */
 .set-scroll {
-  padding: 0 clamp(18px, 4vw, 40px) 56px;
+  padding: 18px clamp(18px, 4vw, 40px) 56px;
 }
 
 .set-col {

@@ -57,6 +57,16 @@ export function Assistant() {
     if (assistantOpen) inputRef.current?.focus();
   }, [assistantOpen]);
 
+  // Grow with the text, up to the cap the stylesheet sets, then scroll. A
+  // textarea has no intrinsic sizing, so this is the only way to have one line
+  // occupy one line.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input]);
+
   const ask = useCallback(
     async (text: string) => {
       const question = text.trim();
@@ -195,6 +205,10 @@ export function Assistant() {
         )}
       </div>
 
+      {/* One rounded field with the button inside it, growing with the text up to
+          a few lines. The two-box version put a fixed 2-row textarea beside a
+          square button, so a one-line question sat in a box built for two and a
+          long one scrolled inside three. */}
       <form
         className="asst-composer"
         onSubmit={(e) => {
@@ -202,29 +216,32 @@ export function Assistant() {
           void ask(input);
         }}
       >
-        <textarea
-          ref={inputRef}
-          className="asst-input"
-          value={input}
-          rows={2}
-          placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"
-          disabled={busy}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void ask(input);
-            }
-          }}
-        />
-        <button
-          type="submit"
-          className="btn btn-primary asst-send"
-          disabled={busy || !input.trim()}
-          aria-label="发送"
-        >
-          <Icon name="send" size={15} />
-        </button>
+        <div className="asst-field">
+          <textarea
+            ref={inputRef}
+            className="asst-input"
+            value={input}
+            rows={1}
+            placeholder="问点什么…"
+            disabled={busy}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void ask(input);
+              }
+            }}
+          />
+          <button
+            type="submit"
+            className="asst-send"
+            disabled={busy || !input.trim()}
+            title="发送（Enter，Shift+Enter 换行）"
+            aria-label="发送"
+          >
+            <Icon name={busy ? "loader" : "send"} size={15} className={busy ? "mv-spin" : undefined} />
+          </button>
+        </div>
       </form>
     </aside>
   );
