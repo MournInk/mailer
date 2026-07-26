@@ -468,6 +468,9 @@ impl SyncEngine {
         }
 
         let channels = self.store.list_channels()?;
+        // Read once per cycle, not per message: the user is not editing labels
+        // in the middle of a classification run, and this is a table scan.
+        let labels = self.store.list_labels()?;
         let mut done = 0u32;
         let mut consecutive_failures = 0u32;
         // One lookup per account per cycle rather than per message.
@@ -482,7 +485,7 @@ impl SyncEngine {
                     v
                 }
             };
-            match ai::classify(&self.http, &settings, &msg).await {
+            match ai::classify(&self.http, &settings, &msg, &labels).await {
                 Ok(analysis) => {
                     consecutive_failures = 0;
                     self.store.set_analysis(&msg.id, &analysis)?;
@@ -680,7 +683,8 @@ impl SyncEngine {
             ));
         }
         let msg = self.store.get_message(message_id)?;
-        let analysis = ai::classify(&self.http, &settings, &msg).await?;
+        let labels = self.store.list_labels().unwrap_or_default();
+        let analysis = ai::classify(&self.http, &settings, &msg, &labels).await?;
         self.store.set_analysis(message_id, &analysis)?;
         let channels = self.store.list_channels()?;
         self.act_on(&msg, &analysis, &settings, &channels, false).await;

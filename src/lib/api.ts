@@ -23,6 +23,9 @@ import type {
   EmbeddingSettingsInput,
   EmbeddingSettingsPublic,
   IndexStatus,
+  LabelCount,
+  LabelInput,
+  MailLabel,
   McpServerInput,
   McpServerPublic,
   McpServerStatus,
@@ -126,6 +129,13 @@ export const deleteMcpServer = (id: string) =>
 export const mcpStatus = () => invoke<McpServerStatus[]>("mcp_status");
 /** Drop every cached session and connect again from scratch. */
 export const reconnectMcp = () => invoke<McpServerStatus[]>("reconnect_mcp");
+
+// -- labels -----------------------------------------------------------------
+
+export const listLabels = () => invoke<MailLabel[]>("list_labels");
+export const labelCounts = () => invoke<LabelCount[]>("label_counts");
+export const saveLabel = (input: LabelInput) => invoke<MailLabel[]>("save_label", { input });
+export const deleteLabel = (id: string) => invoke<MailLabel[]>("delete_label", { id });
 
 // -- privacy / trackers -----------------------------------------------------
 

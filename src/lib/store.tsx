@@ -20,6 +20,8 @@ import type {
   Category,
   CategoryCount,
   EmailMessage,
+  LabelCount,
+  MailLabel,
   MessagePage,
   SyncStatus,
 } from "./types";
@@ -38,6 +40,8 @@ export type SettingsTab =
 export interface MailFilter {
   accountId: string | null;
   category: Category | null;
+  /** one of the user's own labels */
+  labelId: string | null;
   starredOnly: boolean;
   unreadOnly: boolean;
   search: string;
@@ -60,6 +64,7 @@ export interface ComposeState {
 const EMPTY_FILTER: MailFilter = {
   accountId: null,
   category: null,
+  labelId: null,
   starredOnly: false,
   unreadOnly: false,
   search: "",
@@ -71,6 +76,8 @@ interface AppStore {
   // data
   accounts: AccountPublic[];
   counts: CategoryCount[];
+  labels: MailLabel[];
+  labelCounts: LabelCount[];
   syncMap: Record<string, SyncStatus>;
   page: MessagePage;
   filter: MailFilter;
@@ -97,6 +104,8 @@ interface AppStore {
 
   // actions
   refreshAccounts: () => Promise<void>;
+  /** Re-read the labels and their counts — after editing them, or after a sync. */
+  refreshLabels: () => Promise<void>;
   refreshList: () => Promise<void>;
   loadMore: () => Promise<void>;
   setFilter: (patch: Partial<MailFilter>) => void;
@@ -145,6 +154,8 @@ let toastSeq = 1;
 export function AppProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<AccountPublic[]>([]);
   const [counts, setCounts] = useState<CategoryCount[]>([]);
+  const [labels, setLabels] = useState<MailLabel[]>([]);
+  const [labelCounts, setLabelCounts] = useState<LabelCount[]>([]);
   const [syncMap, setSyncMap] = useState<Record<string, SyncStatus>>({});
   const [page, setPage] = useState<MessagePage>({ items: [], total: 0, unread: 0 });
   const [filter, setFilterState] = useState<MailFilter>(EMPTY_FILTER);
@@ -216,10 +227,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, [pushToast]);
 
+  const refreshLabels = useCallback(async () => {
+    // Quietly: labels are an optional feature and a failure here must not put a
+    // toast in front of somebody who never made one.
+    try {
+      const [ls, cs] = await Promise.all([api.listLabels(), api.labelCounts()]);
+      setLabels(ls);
+      setLabelCounts(cs);
+    } catch {
+      /* leave what we have */
+    }
+  }, []);
+
   const queryFromFilter = useCallback((f: MailFilter, offset: number) => {
     return {
       accountId: f.accountId,
       category: f.category,
+      labelId: f.labelId,
       unreadOnly: f.unreadOnly,
       starredOnly: f.starredOnly,
       search: f.search || null,
@@ -453,6 +477,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         void refreshList();
+        // New mail changes the label counts too, and the sidebar is showing them.
+        void refreshLabels();
       }, 400);
     };
 
@@ -488,6 +514,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     // initial load
     void refreshAccounts();
+    void refreshLabels();
     void api
       .syncStatuses()
       .then((list) => {
@@ -510,6 +537,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     () => ({
       accounts,
       counts,
+      labels,
+      labelCounts,
       syncMap,
       page,
       filter,
@@ -525,6 +554,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       toasts,
       compose,
       refreshAccounts,
+      refreshLabels,
       refreshList,
       loadMore,
       setFilter,
@@ -553,6 +583,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [
       accounts, counts, syncMap, page, filter, selected, selectedId,
       loadingList, loadingMore, view, settingsTab, theme, blockTrackers, alerts, toasts, compose,
+      labels, labelCounts, refreshLabels,
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
       markReadAction, remove, sync, openSettings, closeSettings, setTheme,
       pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, closeCompose,

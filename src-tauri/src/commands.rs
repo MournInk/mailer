@@ -572,6 +572,94 @@ pub fn set_reranker_settings(
 }
 
 // ---------------------------------------------------------------------------
+// User-defined labels
+// ---------------------------------------------------------------------------
+
+/// A label is a name plus a sentence; the sentence is the whole feature, so it
+/// is the one field with a real minimum.
+const MIN_INSTRUCTION_CHARS: usize = 4;
+/// Labels one mailbox may define. Each one is prompt text on every message that
+/// arrives, so the ceiling is a cost ceiling, not a storage one.
+const MAX_LABELS: usize = 20;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelInput {
+    /// None → create.
+    pub id: Option<String>,
+    pub name: String,
+    pub instruction: String,
+    pub color_hue: u16,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub fn list_labels(state: State<'_, AppState>) -> CmdResult<Vec<MailLabel>> {
+    state.engine.store().list_labels().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn label_counts(state: State<'_, AppState>) -> CmdResult<Vec<LabelCount>> {
+    state.engine.store().label_counts().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn save_label(state: State<'_, AppState>, input: LabelInput) -> CmdResult<Vec<MailLabel>> {
+    let store = state.engine.store();
+    let name = input.name.trim().to_string();
+    let instruction = input.instruction.trim().to_string();
+    if name.is_empty() {
+        return Err("请给标签起一个名字".into());
+    }
+    if instruction.chars().count() < MIN_INSTRUCTION_CHARS {
+        return Err("请描述一下什么样的邮件属于这个标签，模型要靠这句话判断".into());
+    }
+
+    let mut labels = store.list_labels().map_err(err_str)?;
+    let existing = input
+        .id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| labels.iter().position(|l| l.id == id));
+    if existing.is_none() && labels.len() >= MAX_LABELS {
+        return Err(format!("最多 {MAX_LABELS} 个标签"));
+    }
+    // The name is what the model answers with, so two labels sharing one would
+    // make the answer ambiguous and attach mail to both.
+    if labels
+        .iter()
+        .enumerate()
+        .any(|(i, l)| Some(i) != existing && l.name.trim().eq_ignore_ascii_case(&name))
+    {
+        return Err(format!("已经有一个叫「{name}」的标签了"));
+    }
+
+    let label = MailLabel {
+        id: existing
+            .map(|i| labels[i].id.clone())
+            .unwrap_or_else(new_id),
+        name,
+        instruction,
+        color_hue: input.color_hue.min(360),
+        enabled: input.enabled,
+        created_at: existing.map(|i| labels[i].created_at).unwrap_or_else(now_ms),
+    };
+    store.put_label(&label).map_err(err_str)?;
+    match existing {
+        Some(i) => labels[i] = label,
+        None => labels.push(label),
+    }
+    Ok(labels)
+}
+
+#[tauri::command]
+pub fn delete_label(state: State<'_, AppState>, id: String) -> CmdResult<Vec<MailLabel>> {
+    let store = state.engine.store();
+    store.delete_label(&id).map_err(err_str)?;
+    store.list_labels().map_err(err_str)
+}
+
+// ---------------------------------------------------------------------------
 // Trackers
 // ---------------------------------------------------------------------------
 

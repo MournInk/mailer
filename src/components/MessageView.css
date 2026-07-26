@@ -524,6 +524,27 @@
   height: 30px;
 }
 
+/* -- user labels on a message ---------------------------------------------- */
+
+.mv-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mv-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+}
+
 /* -- what the mail wanted to load ------------------------------------------ */
 
 .mv-track-toggle {

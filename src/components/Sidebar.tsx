@@ -47,6 +47,8 @@ export function Sidebar() {
   const {
     accounts,
     counts,
+    labels,
+    labelCounts,
     syncMap,
     filter,
     theme,
@@ -65,7 +67,8 @@ export function Sidebar() {
   const pending = counts.find((c) => c.category === "pending");
 
   // "全部邮件" is the neutral state: no category and no starred/unread toggle.
-  const allActive = !filter.category && !filter.starredOnly && !filter.unreadOnly;
+  const allActive =
+    !filter.category && !filter.labelId && !filter.starredOnly && !filter.unreadOnly;
 
   const syncing = accounts.some((a) => {
     const s = syncMap[a.id];
@@ -96,7 +99,12 @@ export function Sidebar() {
             count={totalUnread}
             active={allActive}
             onClick={() =>
-              setFilter({ category: null, starredOnly: false, unreadOnly: false })
+              setFilter({
+                category: null,
+                labelId: null,
+                starredOnly: false,
+                unreadOnly: false,
+              })
             }
           />
 
@@ -136,6 +144,31 @@ export function Sidebar() {
             onClick={() => setFilter({ unreadOnly: !filter.unreadOnly })}
           />
         </section>
+
+        {/* The user's own categories. Absent entirely until they define one —
+            an empty section that says "you could have labels" is a nag. */}
+        {labels.some((l) => l.enabled) && (
+          <section className="side-section">
+            <div className="side-section-head">我的标签</div>
+            <div className="side-rule" />
+            {labels
+              .filter((l) => l.enabled)
+              .map((l) => (
+                <NavRow
+                  key={l.id}
+                  icon="tag"
+                  color={`hsl(${l.colorHue} 62% 48%)`}
+                  label={l.name}
+                  title={l.instruction}
+                  count={labelCounts.find((c) => c.labelId === l.id)?.unread ?? 0}
+                  active={filter.labelId === l.id}
+                  onClick={() =>
+                    setFilter({ labelId: filter.labelId === l.id ? null : l.id })
+                  }
+                />
+              ))}
+          </section>
+        )}
 
         <section className="side-section">
           <div className="side-section-head">账户</div>

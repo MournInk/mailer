@@ -406,6 +406,19 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
 
               {analysis.summary && <p className="mv-summary">{analysis.summary}</p>}
 
+              {/* The user's own categories, if any applied. Under the summary
+                  because that is what they qualify — not the verdict above. */}
+              {analysis.labels.length > 0 && (
+                <div className="mv-labels">
+                  {analysis.labels.map((name) => (
+                    <span key={name} className="mv-label">
+                      <Icon name="tag" size={12} />
+                      {name}
+                    </span>
+                  ))}
+                </div>
+              )}
+
               <footer className="mv-ai-foot">
                 <span className="mv-conf">
                   置信度

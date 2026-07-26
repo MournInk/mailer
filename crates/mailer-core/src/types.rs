@@ -160,6 +160,11 @@ pub struct AiAnalysis {
     pub deletable: bool,
     /// Short model-provided justification (debugging / transparency UI).
     pub reason: String,
+    /// Names of the user's own labels the model judged to apply. Empty is the
+    /// normal answer. Stored alongside the analysis so a list row can show them
+    /// without a join; the authoritative link is `message_labels`.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +233,8 @@ pub struct MessageQuery {
     pub account_id: Option<String>,
     pub folder: Option<String>,
     pub category: Option<Category>,
+    /// One of the user's own labels.
+    pub label_id: Option<String>,
     pub unread_only: bool,
     pub starred_only: bool,
     /// Substring search over subject / sender / snippet.
@@ -671,6 +678,52 @@ pub struct IndexStatus {
     /// Set while a backfill is running.
     pub building: bool,
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// User-defined labels
+// ---------------------------------------------------------------------------
+
+/// A category the user described in their own words.
+///
+/// The four built-in categories are about what mail *is* — a code, a bill, a
+/// blast. They cannot express what it is about *to this person*: 候选人简历,
+/// 房东通知, 报销单据. Those are different for everyone, which is why the
+/// definition is a sentence the user writes rather than a rule they build.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MailLabel {
+    pub id: String,
+    /// What it is called. Also what the model is asked to answer with, so it has
+    /// to mean something on its own.
+    pub name: String,
+    /// How to recognise it, in the user's own words. This is the whole feature.
+    pub instruction: String,
+    pub color_hue: u16,
+    pub enabled: bool,
+    pub created_at: i64,
+}
+
+impl Default for MailLabel {
+    fn default() -> Self {
+        MailLabel {
+            id: String::new(),
+            name: String::new(),
+            instruction: String::new(),
+            color_hue: 210,
+            enabled: true,
+            created_at: 0,
+        }
+    }
+}
+
+/// One label plus how much mail is under it, for the sidebar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelCount {
+    pub label_id: String,
+    pub total: u32,
+    pub unread: u32,
 }
 
 // ---------------------------------------------------------------------------

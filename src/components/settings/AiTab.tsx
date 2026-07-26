@@ -16,6 +16,7 @@ import { useApp } from "../../lib/store";
 import type { AiProvider, AiSettingsPublic, TestResult } from "../../lib/types";
 import { Icon } from "../Icon";
 import { Group, Section, SwitchField, TestOutput } from "./parts";
+import { LabelsSection } from "./LabelsSection";
 
 /** The four wire protocols the backend can speak. */
 const PROVIDERS: Array<{ id: AiProvider; name: string; hint: string }> = [
@@ -299,6 +300,8 @@ export function AiTab() {
           </div>
         </Group>
       </Section>
+
+      <LabelsSection />
 
       <Section
         title="分类偏好"

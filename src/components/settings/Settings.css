@@ -1020,6 +1020,96 @@
   line-height: 1.65;
 }
 
+/* -- user labels ----------------------------------------------------------- */
+
+.lb-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Wraps, because the delete confirmation drops in as a full-width row under it. */
+.lb-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.lb-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.lb-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.lb-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The definition, shown in full rather than truncated: it is the thing the user
+   is actually maintaining, and a clipped sentence cannot be checked. */
+.lb-instruction {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+.lb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.lb-hues {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.lb-hue {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: 0 0 0 1px var(--line);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.lb-hue:hover {
+  transform: scale(1.08);
+}
+
+.lb-hue.active {
+  border-color: var(--surface);
+  box-shadow: 0 0 0 2px var(--ink-2);
+}
+
 /* -- privacy --------------------------------------------------------------- */
 
 .pv-totals {

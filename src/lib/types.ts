@@ -75,6 +75,33 @@ export interface AiAnalysis {
   verificationCode: string | null;
   deletable: boolean;
   reason: string;
+  /** names of the user's own labels the model judged to apply */
+  labels: string[];
+}
+
+/** A category the user described in their own words. */
+export interface MailLabel {
+  id: string;
+  name: string;
+  /** how to recognise it, in plain language — this is what the model reads */
+  instruction: string;
+  colorHue: number;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export interface LabelInput {
+  id?: string | null;
+  name: string;
+  instruction: string;
+  colorHue: number;
+  enabled: boolean;
+}
+
+export interface LabelCount {
+  labelId: string;
+  total: number;
+  unread: number;
 }
 
 export interface AttachmentMeta {
@@ -126,6 +153,8 @@ export interface MessageQuery {
   accountId?: string | null;
   folder?: string | null;
   category?: Category | null;
+  /** one of the user's own labels */
+  labelId?: string | null;
   unreadOnly?: boolean;
   starredOnly?: boolean;
   search?: string | null;

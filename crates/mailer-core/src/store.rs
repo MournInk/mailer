@@ -179,6 +179,29 @@ CREATE TABLE IF NOT EXISTS memory_events (
 CREATE INDEX IF NOT EXISTS idx_memory_events_mem
     ON memory_events(memory_id, created_at DESC);
 
+-- Categories the user described in their own words.
+--
+-- `instruction` is the definition: prose the triage prompt carries, not a rule
+-- the app evaluates. That is the point — "求职者投递简历或跟进面试" is not
+-- expressible as a filter, and everybody's version of it is different.
+CREATE TABLE IF NOT EXISTS labels (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    color_hue   INTEGER NOT NULL DEFAULT 210,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_labels (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    label_id   TEXT NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, label_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_labels_label
+    ON message_labels(label_id);
+
 -- What each message tried to load from somebody else's server.
 --
 -- Written when the mail arrives, whether or not it is ever opened: "how much of
@@ -453,6 +476,73 @@ impl Store {
                 index_text(c, m)?;
             }
             Ok(n > 0)
+        })
+    }
+
+    // -- labels -------------------------------------------------------------
+
+    pub fn list_labels(&self) -> Result<Vec<MailLabel>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, name, instruction, color_hue, enabled, created_at
+                   FROM labels ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(MailLabel {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    instruction: r.get(2)?,
+                    color_hue: r.get::<_, i64>(3)?.clamp(0, 360) as u16,
+                    enabled: r.get::<_, i64>(4)? != 0,
+                    created_at: r.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn put_label(&self, l: &MailLabel) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO labels (id, name, instruction, color_hue, enabled, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                   name=excluded.name, instruction=excluded.instruction,
+                   color_hue=excluded.color_hue, enabled=excluded.enabled",
+                params![l.id, l.name, l.instruction, l.color_hue, l.enabled as i64, l.created_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_label(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            let n = c.execute("DELETE FROM labels WHERE id=?1", params![id])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("label {id}")));
+            }
+            Ok(())
+        })
+    }
+
+    /// Per-label totals for the sidebar, over undeleted mail.
+    pub fn label_counts(&self) -> Result<Vec<LabelCount>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT l.id, COUNT(m.id), COALESCE(SUM(m.unread), 0)
+                   FROM labels l
+                   LEFT JOIN message_labels ml ON ml.label_id = l.id
+                   LEFT JOIN messages m ON m.id = ml.message_id AND m.deleted=0
+                  GROUP BY l.id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(LabelCount {
+                    label_id: r.get(0)?,
+                    total: r.get::<_, i64>(1)?.max(0) as u32,
+                    unread: r.get::<_, i64>(2)?.max(0) as u32,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
 
@@ -758,6 +848,13 @@ impl Store {
                 args.push(Box::new(cat.as_str().to_string()));
                 where_sql.push_str(&format!(" AND category=?{}", args.len()));
             }
+            if let Some(label) = q.label_id.as_deref().filter(|s| !s.is_empty()) {
+                args.push(Box::new(label.to_string()));
+                where_sql.push_str(&format!(
+                    " AND id IN (SELECT message_id FROM message_labels WHERE label_id=?{})",
+                    args.len()
+                ));
+            }
             if q.unread_only {
                 where_sql.push_str(" AND unread=1");
             }
@@ -860,11 +957,24 @@ impl Store {
     }
 
     pub fn set_analysis(&self, id: &str, analysis: &AiAnalysis) -> Result<()> {
-        self.with(|c| {
+        self.with_tx(|c| {
             c.execute(
                 "UPDATE messages SET category=?2, analysis_json=?3 WHERE id=?1",
                 params![id, analysis.category.as_str(), serde_json::to_string(analysis)?],
             )?;
+            // The labels land with the verdict that produced them, in the same
+            // transaction. As a separate call the sidebar counts and the list
+            // rows could disagree about the same message.
+            c.execute("DELETE FROM message_labels WHERE message_id=?1", params![id])?;
+            if !analysis.labels.is_empty() {
+                let mut stmt = c.prepare(
+                    "INSERT OR IGNORE INTO message_labels (message_id, label_id)
+                     SELECT ?1, id FROM labels WHERE name=?2",
+                )?;
+                for name in &analysis.labels {
+                    stmt.execute(params![id, name])?;
+                }
+            }
             Ok(())
         })
     }
@@ -2214,7 +2324,8 @@ mod tests {
             verification_code: Some("482913".into()),
             deletable: false,
             reason: "OTP email".into(),
-        };
+                    labels: Vec::new(),
+};
         s.set_analysis("m1", &a).unwrap();
         assert!(s.unclassified(10).unwrap().is_empty());
         let m = s.get_message("m1").unwrap();
@@ -2307,6 +2418,63 @@ mod tests {
         .unwrap();
         assert!(s.conversation_exists("c1").unwrap());
         assert!(!s.conversation_exists("c2").unwrap());
+    }
+
+    /// A label filters the list, and its count follows the mail rather than the
+    /// verdict text — the join table is what the sidebar reads.
+    #[test]
+    fn labels_attach_to_mail_and_filter_it() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        let now = 1_700_000_000_000;
+        s.put_label(&MailLabel {
+            id: "l1".into(),
+            name: "候选人简历".into(),
+            instruction: "求职者投递简历".into(),
+            created_at: now,
+            ..Default::default()
+        })
+        .unwrap();
+
+        for i in 0..3 {
+            let mut m = sample_message(&format!("m{i}"), &format!("{i}"));
+            m.message_id = Some(format!("<m{i}@x>"));
+            m.unread = i == 0;
+            s.insert_message(&m).unwrap();
+        }
+        let labelled = |names: Vec<String>| AiAnalysis {
+            category: Category::Normal,
+            confidence: 0.9,
+            summary: "x".into(),
+            verification_code: None,
+            deletable: false,
+            reason: "r".into(),
+            labels: names,
+        };
+        s.set_analysis("m0", &labelled(vec!["候选人简历".into()])).unwrap();
+        s.set_analysis("m1", &labelled(vec!["候选人简历".into()])).unwrap();
+        // A name nobody defined attaches to nothing, rather than erroring.
+        s.set_analysis("m2", &labelled(vec!["不存在的标签".into()])).unwrap();
+
+        let counts = s.label_counts().unwrap();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].total, 2);
+        assert_eq!(counts[0].unread, 1);
+
+        let page = s
+            .query_messages(&MessageQuery { label_id: Some("l1".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.items.iter().all(|m| m.id != "m2"));
+
+        // Re-classifying replaces rather than accumulating.
+        s.set_analysis("m0", &labelled(Vec::new())).unwrap();
+        assert_eq!(s.label_counts().unwrap()[0].total, 1);
+
+        // Deleting the label takes its attachments with it, and leaves the mail.
+        s.delete_label("l1").unwrap();
+        assert!(s.label_counts().unwrap().is_empty());
+        assert_eq!(s.query_messages(&MessageQuery::default()).unwrap().total, 3);
     }
 
     /// The index format. FTS5 cannot segment Chinese, so both sides of the

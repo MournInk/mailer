@@ -426,7 +426,8 @@ async fn analyze_mail(ctx: &ToolContext, args: &Value) -> Result<Value> {
 
     // No stored verdict: this message arrived while triage was off, or the run
     // failed. Classifying it now also fills the gap for the mail list.
-    let analysis = crate::ai::classify(&ctx.http, &ctx.ai, &msg).await?;
+    let labels = ctx.store.list_labels().unwrap_or_default();
+    let analysis = crate::ai::classify(&ctx.http, &ctx.ai, &msg, &labels).await?;
     ctx.store.set_analysis(&msg.id, &analysis)?;
     Ok(analysis_value(&msg.id, &analysis, false))
 }
@@ -1075,7 +1076,8 @@ mod tests {
                     verification_code: None,
                     deletable: false,
                     reason: "invoice".into(),
-                },
+                                    labels: Vec::new(),
+},
             )
             .unwrap();
 
