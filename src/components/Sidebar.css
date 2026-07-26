@@ -23,62 +23,29 @@
 
 /* -- head ------------------------------------------------------------------ */
 
+/* Where the brand used to be. The column now opens on the one thing you come
+   here to start, sized as a full-width primary pill (HeroUI's filled-pill CTA,
+   ElevenLabs' "the pill is the only CTA shape"). */
 .side-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  /* the 38px title bar already supplies the air above; only the gap to the
-     first section label needs to be generous */
-  padding: 9px 8px 14px 12px;
-}
-
-.side-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-
-/* accent-tinted mark, same lockup as the onboarding header at 26/32 scale */
-.side-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-  color: var(--accent-soft-ink);
-}
-
-.wordmark {
-  min-width: 0;
-  font-family: var(--font-display);
-  font-size: var(--text-md);
-  letter-spacing: -0.01em;
-  color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  padding: 2px 12px 14px;
 }
 
 .sidebar-pane .side-compose {
-  flex-shrink: 0;
-}
-.sidebar-pane .side-compose:hover {
-  background: var(--accent-soft);
-  color: var(--accent-soft-ink);
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  justify-content: center;
+  gap: 7px;
+  border-radius: var(--radius-pill);
+  font-weight: 550;
+  box-shadow: var(--shadow-sm);
 }
 
 /* -- scrolling body -------------------------------------------------------- */
 
+/* Sizing and overflow belong to `OverlayScroll`. */
 .side-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
   padding: 0 8px 14px;
 }
 
@@ -90,9 +57,10 @@
 .side-section-head {
   padding: 0 10px;
   margin-bottom: 7px;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.14em;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -220,6 +188,20 @@
 
 /* -- account rows ---------------------------------------------------------- */
 
+/* "全部邮箱" is an account row without an account: same geometry so the group
+   reads as one list, neutral mark so it does not impersonate a mailbox. */
+.acct-avatar-all {
+  background: var(--surface-2);
+  color: var(--ink-3);
+}
+.acct-row.acct-all.active .acct-avatar-all,
+.acct-row.acct-all:hover .acct-avatar-all {
+  color: var(--ink-2);
+}
+.acct-row.acct-all {
+  margin-bottom: 2px;
+}
+
 .acct-row {
   position: relative;
   display: flex;
@@ -313,16 +295,12 @@
 .side-foot {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  justify-content: space-evenly;
+  gap: 4px;
+  padding: 7px 10px;
   border-top: 1px solid var(--line);
   /* a raised band closes the column instead of letting the controls float */
   background: var(--bg-raised);
-}
-.side-foot .sync-btn {
-  flex: 1;
-  min-width: 0;
-  border-color: var(--line);
 }
 
 /* -- spinner --------------------------------------------------------------- */
@@ -340,16 +318,16 @@
 
 @media (max-width: 900px) {
   .side-head {
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px 0;
-  }
-  .side-brand {
-    flex: none;
+    padding: 4px 0 10px;
     justify-content: center;
   }
-  /* the mark alone carries the brand once there is no room for the name */
-  .wordmark {
+  /* the pill becomes a circle: the icon alone carries it on the rail */
+  .sidebar-pane .side-compose {
+    flex: none;
+    width: 36px;
+    padding: 0;
+  }
+  .sidebar-pane .side-compose .btn-text {
     display: none;
   }
 
@@ -408,11 +386,6 @@
     gap: 4px;
     padding: 8px 0;
   }
-  .side-foot .sync-btn {
-    flex: none;
-    width: 30px;
-    padding: 0;
-  }
   .side-foot .btn-text {
     display: none;
   }
@@ -432,9 +405,6 @@
     width: 40px;
     height: 40px;
   }
-  .side-foot .sync-btn {
-    height: 40px;
-  }
 }
 
 @media (pointer: coarse) and (max-width: 900px) {
@@ -447,8 +417,5 @@
   }
   .side-foot {
     padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
-  }
-  .side-foot .sync-btn {
-    width: 40px;
   }
 }

@@ -23,6 +23,7 @@ import {
   useContextMenu,
   type MenuItem,
 } from "./ContextMenu";
+import { OverlayScroll, type OverlayScrollHandle } from "./OverlayScroll";
 import "./MessageList.css";
 
 /** Keystroke settling time before the search hits the backend. */
@@ -109,6 +110,12 @@ export function MessageList() {
         (s) => s.phase !== "idle" && s.phase !== "error",
       ),
     [syncMap],
+  );
+
+  // One lookup for the whole render instead of a linear scan per row.
+  const accountEmail = useMemo(
+    () => new Map(accounts.map((a) => [a.id, a.email])),
+    [accounts],
   );
 
   // -- keyboard cursor ------------------------------------------------------
@@ -305,7 +312,7 @@ export function MessageList() {
   );
 
   // -- infinite scroll ------------------------------------------------------
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<OverlayScrollHandle | null>(null);
   /** Offset we already asked for — stops a stalled page from looping. */
   const attempted = useRef(-1);
 
@@ -314,7 +321,7 @@ export function MessageList() {
   }, [filter]);
 
   const maybeLoadMore = useCallback(() => {
-    const el = scrollRef.current;
+    const el = scrollRef.current?.el;
     if (!el || loadingList || loadingMore) return;
     if (items.length >= page.total || attempted.current === items.length) return;
     if (el.scrollHeight - el.scrollTop - el.clientHeight > NEAR_BOTTOM) return;
@@ -374,11 +381,21 @@ export function MessageList() {
           {page.unread > 0 && (
             <span className="ml-scope-unread">{page.unread} 未读</span>
           )}
+          {/* The app's sync control, next to the count it changes. It follows
+              the current scope: one account when the list is filtered to one,
+              every account otherwise. */}
           <button
             className="icon-btn ml-refresh"
             onClick={() => void sync(filter.accountId)}
-            aria-label="立即同步"
-            title="立即同步"
+            disabled={syncing}
+            aria-label={syncing ? "正在同步" : "立即收取新邮件"}
+            title={
+              syncing
+                ? "正在同步…"
+                : filter.accountId
+                  ? `立即收取「${accountLabel ?? "该账户"}」的新邮件`
+                  : "立即收取全部账户的新邮件"
+            }
           >
             <Icon name="refresh" size={15} className={syncing ? "ml-spin" : undefined} />
           </button>
@@ -408,9 +425,9 @@ export function MessageList() {
         </div>
       )}
 
-      <div
+      <OverlayScroll
         className="ml-scroll"
-        ref={scrollRef}
+        handle={scrollRef}
         onScroll={maybeLoadMore}
         onKeyDown={onKeyDown}
         tabIndex={0}
@@ -458,8 +475,12 @@ export function MessageList() {
                 onToggleStar={toggleStar}
                 onCopyCode={copyCode}
                 picked={picked.has(m.id)}
-                showAccount={!filter.accountId && accounts.length > 1}
-                accountLabel={accounts.find((a) => a.id === m.accountId)?.email ?? ""}
+                /* Which mailbox took delivery. Shown whenever the list is not
+                   already narrowed to one account — including with a single
+                   account configured, where it used to be hidden and the answer
+                   to "which address is this going to" was nowhere on screen. */
+                showAccount={!filter.accountId}
+                accountLabel={accountEmail.get(m.accountId) ?? ""}
                 onRowClick={onRowClick}
                 onContextMenu={rowMenu}
                 registerRow={registerRow}
@@ -474,7 +495,7 @@ export function MessageList() {
           </>
         )}
         </div>
-      </div>
+      </OverlayScroll>
 
       <ContextMenu state={menu} onClose={closeMenu} />
     </section>

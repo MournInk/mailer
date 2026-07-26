@@ -1,13 +1,17 @@
 /**
  * Left navigation column: wordmark + compose, smart views (categories,
  * starred, unread), the account list with live sync indicators, and a footer
- * with sync / theme / settings.
+ * with assistant / theme / settings.
+ *
+ * The brand lockup lives in the title bar and syncing lives in the message list
+ * header, beside the count it changes. What is left here is navigation.
  *
  * Under 900px `.mail-layout` shrinks this pane to a 64px icon rail; every
  * text label is hidden by CSS there, so each control carries a `title=`.
  */
 
 import { Icon } from "./Icon";
+import { OverlayScroll } from "./OverlayScroll";
 import { useApp, type ThemePref } from "../lib/store";
 import { CATEGORY_LABEL, type Category, type SyncStatus } from "../lib/types";
 import "./Sidebar.css";
@@ -47,7 +51,6 @@ export function Sidebar() {
     filter,
     theme,
     setFilter,
-    sync,
     setTheme,
     openSettings,
     openCompose,
@@ -73,25 +76,16 @@ export function Sidebar() {
 
   return (
     <nav className="sidebar-pane">
-      <header className="side-head">
-        {/* the onboarding brand lockup, scaled down: accent chip + serif name */}
-        <span className="side-brand">
-          <span className="side-mark" aria-hidden>
-            <Icon name="mail" size={15} />
-          </span>
-          <span className="wordmark">Mailer</span>
-        </span>
-        <button
-          className="icon-btn side-compose"
-          title="写邮件"
-          aria-label="写邮件"
-          onClick={() => openCompose()}
-        >
-          <Icon name="edit" size={16} />
+      {/* The brand moved up into the title bar, so the column opens on its one
+          primary action instead of a second header. */}
+      <div className="side-head">
+        <button className="btn btn-primary side-compose" onClick={() => openCompose()}>
+          <Icon name="edit" size={15} />
+          <span className="btn-text">写邮件</span>
         </button>
-      </header>
+      </div>
 
-      <div className="side-body">
+      <OverlayScroll className="side-body">
         <section className="side-section">
           <div className="side-section-head">智能分类</div>
           <div className="side-rule" />
@@ -147,6 +141,27 @@ export function Sidebar() {
           <div className="side-section-head">账户</div>
           <div className="side-rule" />
 
+          {/* Named, not implied: the aggregate view used to be reachable only by
+              clicking the active account a second time to switch its filter off,
+              which is not something anyone guesses. */}
+          <button
+            className={`acct-row acct-all${filter.accountId === null ? " active" : ""}`}
+            title="查看所有已配置邮箱的邮件"
+            aria-current={filter.accountId === null ? "true" : undefined}
+            onClick={() => setFilter({ accountId: null })}
+          >
+            <span className="acct-avatar acct-avatar-all" aria-hidden>
+              <Icon name="inbox" size={14} />
+            </span>
+            <span className="acct-text">
+              <span className="acct-name">全部邮箱</span>
+              <span className="acct-mail">
+                {accounts.length} 个账户
+                {syncing ? " · 同步中" : ""}
+              </span>
+            </span>
+          </button>
+
           {accounts.map((a) => {
             const active = filter.accountId === a.id;
             return (
@@ -173,8 +188,11 @@ export function Sidebar() {
             );
           })}
         </section>
-      </div>
+      </OverlayScroll>
 
+      {/* Syncing moved to the message list header, next to the count it changes.
+          A wide labelled button among three icon buttons was the odd one out,
+          and it duplicated the refresh control the list already had. */}
       <footer className="side-foot">
         <button
           className={`icon-btn${assistantOpen ? " active" : ""}`}
@@ -184,14 +202,6 @@ export function Sidebar() {
           onClick={() => setAssistantOpen(!assistantOpen)}
         >
           <Icon name="spark" size={16} />
-        </button>
-        <button
-          className="btn btn-sm sync-btn"
-          title="立即同步全部账户"
-          onClick={() => void sync()}
-        >
-          <Icon name="refresh" size={15} className={syncing ? "spin" : undefined} />
-          <span className="btn-text">同步</span>
         </button>
         <button
           className="icon-btn"
