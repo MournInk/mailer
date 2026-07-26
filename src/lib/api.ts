@@ -23,6 +23,11 @@ import type {
   TestResult,
 } from "./types";
 
+// -- shell ------------------------------------------------------------------
+
+/** "windows" | "macos" | "linux" | "android" | "ios" */
+export const hostPlatform = () => invoke<string>("host_platform");
+
 // -- accounts ---------------------------------------------------------------
 
 export const listAccounts = () => invoke<AccountPublic[]>("list_accounts");

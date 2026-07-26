@@ -11,6 +11,7 @@ import { SettingsView } from "./components/settings/SettingsView";
 import { Onboarding } from "./components/Onboarding";
 import { AlertCenter } from "./components/AlertCenter";
 import { Compose } from "./components/Compose";
+import { TitleBar } from "./components/TitleBar";
 import "./App.css";
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <TitleBar />
       {view === "settings" ? (
         <SettingsView />
       ) : accounts.length === 0 ? (

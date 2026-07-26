@@ -1,0 +1,97 @@
+.titlebar {
+  flex: 0 0 auto;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* macOS: no controls of our own, just clearance for the traffic lights. */
+.titlebar-inset {
+  height: 30px;
+  background: transparent;
+  border-bottom: none;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.titlebar-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.titlebar-title {
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.titlebar-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+/* Windows caption metrics: 46x100% hit targets, flush to the corner, no gaps —
+   the pointer should never fall between two buttons on the way to close. */
+.win-btn {
+  width: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.win-btn:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.win-btn:active {
+  background: var(--surface-active);
+}
+
+.win-btn:focus-visible {
+  box-shadow: inset var(--focus-ring);
+}
+
+.win-btn-close:hover {
+  background: #c8422f;
+  color: #fff;
+}
+
+.win-btn-close:active {
+  background: #a83526;
+  color: #fff;
+}
+
+/* No window chrome on a phone. */
+@media (pointer: coarse) and (max-width: 900px) {
+  .titlebar {
+    display: none;
+  }
+}

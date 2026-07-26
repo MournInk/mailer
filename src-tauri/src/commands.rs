@@ -12,6 +12,24 @@ use crate::AppState;
 
 type CmdResult<T> = Result<T, String>;
 
+/// Which OS the shell is running on, so the frontend knows whether to draw its
+/// own window controls. Windows and Linux run undecorated and get ours; macOS
+/// keeps its traffic lights, and mobile has no window chrome at all.
+#[tauri::command]
+pub fn host_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else {
+        "linux"
+    }
+}
+
 fn err_str<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }

@@ -86,6 +86,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::host_platform,
             commands::list_accounts,
             commands::save_account,
             commands::delete_account,
