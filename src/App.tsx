@@ -12,6 +12,9 @@ import { Onboarding } from "./components/Onboarding";
 import { AlertCenter } from "./components/AlertCenter";
 import { Compose } from "./components/Compose";
 import { TitleBar } from "./components/TitleBar";
+import { Assistant } from "./components/Assistant";
+import { CommandPalette } from "./components/CommandPalette";
+import { ShortcutListener, ShortcutSheet } from "./components/Shortcuts";
 import "./App.css";
 
 export default function App() {
@@ -29,10 +32,14 @@ export default function App() {
           <Sidebar />
           <MessageList />
           <MessageView />
+          <Assistant />
         </div>
       )}
       <AlertCenter />
       {compose && <Compose />}
+      <CommandPalette />
+      <ShortcutSheet />
+      <ShortcutListener />
     </div>
   );
 }

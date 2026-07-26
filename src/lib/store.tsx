@@ -79,6 +79,12 @@ interface AppStore {
   alerts: AlertEvent[];
   toasts: Toast[];
   compose: ComposeState | null;
+  /** The assistant panel, docked beside the reading pane. */
+  assistantOpen: boolean;
+  /** Superhuman-style command palette. */
+  paletteOpen: boolean;
+  /** The keyboard-shortcut cheat sheet, opened with "?". */
+  shortcutsOpen: boolean;
 
   // actions
   refreshAccounts: () => Promise<void>;
@@ -99,6 +105,9 @@ interface AppStore {
   openAlertMessage: (a: AlertEvent) => Promise<void>;
   openCompose: (init?: Partial<ComposeState>) => void;
   closeCompose: () => void;
+  setAssistantOpen: (open: boolean) => void;
+  setPaletteOpen: (open: boolean) => void;
+  setShortcutsOpen: (open: boolean) => void;
 }
 
 const Ctx = createContext<AppStore | null>(null);
@@ -136,6 +145,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [compose, setCompose] = useState<ComposeState | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   const filterRef = useRef(filter);
   filterRef.current = filter;
@@ -454,6 +466,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       openAlertMessage,
       openCompose,
       closeCompose,
+      assistantOpen,
+      paletteOpen,
+      shortcutsOpen,
+      setAssistantOpen,
+      setPaletteOpen,
+      setShortcutsOpen,
     }),
     [
       accounts, counts, syncMap, page, filter, selected, selectedId,
@@ -461,6 +479,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
       markReadAction, remove, sync, openSettings, closeSettings, setTheme,
       pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, closeCompose,
+      assistantOpen, paletteOpen, shortcutsOpen,
     ],
   );
 

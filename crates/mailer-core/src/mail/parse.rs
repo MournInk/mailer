@@ -261,6 +261,57 @@ fn decode_entities(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod charset_tests {
+    use super::*;
+
+    fn raw(headers: &str, body: &str) -> RawMail {
+        RawMail {
+            uid: "1".into(),
+            folder: "INBOX".into(),
+            bytes: format!("{headers}\r\n\r\n{body}").into_bytes(),
+        }
+    }
+
+    /// Chinese senders routinely encode headers in GB2312/GBK rather than
+    /// UTF-8. Without mail-parser's full_encoding feature those decode to
+    /// replacement characters and the user sees a subject of question marks.
+    #[test]
+    fn gb2312_encoded_headers_decode_to_chinese() {
+        let mail = raw(
+            "From: =?GB2312?B?0KHD17+qt8XGvcyo?= <support@example.com>\r\n\
+             Subject: =?GB2312?B?0+C27tSkvq8=?=\r\n\
+             Date: Sat, 14 Jun 2026 13:12:07 +0800",
+            "balance warning",
+        );
+        let m = parse_mail("id".into(), "acc", &mail, 0).unwrap();
+        assert_eq!(m.subject, "余额预警", "subject: {}", m.subject);
+        assert_eq!(m.from_name, "小米开放平台", "from: {}", m.from_name);
+        assert!(!m.subject.contains('\u{fffd}'));
+    }
+
+    /// A GBK body must survive too, not just the headers.
+    #[test]
+    fn gbk_body_decodes_to_chinese() {
+        let body = encoding_bytes("你好，世界");
+        let mut bytes =
+            b"Content-Type: text/plain; charset=GBK\r\nSubject: t\r\n\r\n".to_vec();
+        bytes.extend_from_slice(&body);
+        let mail = RawMail { uid: "2".into(), folder: "INBOX".into(), bytes };
+        let m = parse_mail("id2".into(), "acc", &mail, 0).unwrap();
+        let text = m.body_text.unwrap_or_default();
+        assert!(text.contains("你好"), "body: {text}");
+    }
+
+    /// GBK bytes for a string, written out so the test does not depend on a
+    /// codec crate of its own.
+    fn encoding_bytes(s: &str) -> Vec<u8> {
+        // 你好，世界 in GBK.
+        assert_eq!(s, "你好，世界");
+        vec![0xC4, 0xE3, 0xBA, 0xC3, 0xA3, 0xAC, 0xCA, 0xC0, 0xBD, 0xE7]
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -1,0 +1,225 @@
+.cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 20px 20px;
+  background: color-mix(in srgb, var(--ink) 32%, transparent);
+  backdrop-filter: blur(3px);
+  animation: cmdk-fade var(--dur-fast) var(--ease-out);
+}
+
+@keyframes cmdk-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.cmdk {
+  width: 100%;
+  max-width: 560px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: cmdk-rise var(--dur-base) var(--ease-out);
+}
+
+@keyframes cmdk-rise {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+}
+
+.cmdk-search {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 15px;
+  height: 52px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cmdk-search-icon {
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+
+.cmdk-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-size: var(--text-lg);
+  color: var(--ink);
+}
+
+.cmdk-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.cmdk-input::placeholder {
+  color: var(--ink-faint);
+}
+
+.cmdk-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.cmdk-empty {
+  padding: 26px 12px;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  color: var(--ink-2);
+  /* No transition: the cursor moves per keystroke and a fade lags behind it. */
+}
+
+.cmdk-item.active {
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+}
+
+.cmdk-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+
+.cmdk-item.active .cmdk-item-icon {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.cmdk-item-label {
+  font-size: var(--text-base);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 60%;
+}
+
+.cmdk-item-hint {
+  font-size: var(--text-sm);
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.cmdk-item-key {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-3);
+}
+
+/* -- shortcut sheet -------------------------------------------------------- */
+
+.keys {
+  width: 100%;
+  max-width: 620px;
+  max-height: 76vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  padding: 24px 26px 26px;
+  animation: cmdk-rise var(--dur-base) var(--ease-out);
+}
+
+.keys-title {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 500;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.keys-lede {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  margin-bottom: 20px;
+}
+
+.keys-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 22px 32px;
+}
+
+.keys-group h3 {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 9px;
+}
+
+.keys-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.keys-row .keys-desc {
+  flex: 1;
+  min-width: 0;
+}
+
+.keys-row kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  white-space: nowrap;
+  flex-shrink: 0;
+}

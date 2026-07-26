@@ -22,7 +22,10 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 
 # mail
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-mail-parser = "0.11"
+# full_encoding pulls in encoding_rs. Without it only UTF-8 and a handful of
+# charsets decode, so a GB2312/GBK subject — anything from a Chinese sender —
+# arrives as replacement characters.
+mail-parser = { version = "0.11", features = ["full_encoding"] }
 lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport",
     "builder",

@@ -5,26 +5,47 @@
   background: var(--bg);
 }
 
+/* The assistant is a flex child that sizes itself, so the layout is a flex row
+   rather than a grid: a grid would need its column template rewritten every
+   time the panel opens or closes. */
 .mail-layout {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 232px minmax(300px, 380px) 1fr;
+  display: flex;
+}
+
+.mail-layout > .sidebar-pane {
+  flex: 0 0 232px;
+  width: 232px;
+}
+
+.mail-layout > .ml-pane {
+  flex: 0 0 clamp(300px, 30%, 380px);
+  min-width: 0;
+}
+
+.mail-layout > .mv-pane {
+  flex: 1;
+  min-width: 0;
 }
 
 /* Narrow windows / mobile: collapse to list + detail overlay pattern.
    (The list pane stays primary; the reading pane slides over it.) */
 @media (max-width: 900px) {
-  .mail-layout {
-    grid-template-columns: 64px minmax(240px, 1fr);
+  .mail-layout > .sidebar-pane {
+    flex: 0 0 64px;
+    width: 64px;
   }
-  .mail-layout .message-view-pane {
+  .mail-layout > .ml-pane {
+    flex: 1;
+  }
+  .mail-layout .mv-pane {
     position: fixed;
     inset: 0;
     z-index: 40;
     background: var(--bg-raised);
   }
-  .mail-layout .message-view-pane.hidden-mobile {
+  .mail-layout .mv-pane.hidden-mobile {
     display: none;
   }
 }

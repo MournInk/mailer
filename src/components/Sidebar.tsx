@@ -51,6 +51,8 @@ export function Sidebar() {
     setTheme,
     openSettings,
     openCompose,
+    assistantOpen,
+    setAssistantOpen,
   } = useApp();
 
   const unreadOf = (key: string) =>
@@ -174,6 +176,15 @@ export function Sidebar() {
       </div>
 
       <footer className="side-foot">
+        <button
+          className={`icon-btn${assistantOpen ? " active" : ""}`}
+          title="AI 助手（Ctrl/⌘ + J）"
+          aria-label="AI 助手"
+          aria-pressed={assistantOpen}
+          onClick={() => setAssistantOpen(!assistantOpen)}
+        >
+          <Icon name="spark" size={16} />
+        </button>
         <button
           className="btn btn-sm sync-btn"
           title="立即同步全部账户"
