@@ -101,41 +101,43 @@ impl SyncEngine {
     }
 
     /// Background scheduler: polls every account at its configured interval.
-    pub fn start_scheduler(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let engine = Arc::clone(self);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(TICK).await;
-                let accounts = match engine.store.list_accounts() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::error!("scheduler: list_accounts failed: {e}");
-                        continue;
+    ///
+    /// Returns a future the host is expected to spawn on its own runtime
+    /// (`tauri::async_runtime::spawn`) — Tauri's `setup` hook runs outside a
+    /// tokio runtime context, so this must not call `tokio::spawn` itself.
+    pub async fn run_scheduler(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(TICK).await;
+            let accounts = match self.store.list_accounts() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!("scheduler: list_accounts failed: {e}");
+                    continue;
+                }
+            };
+            let now = now_ms();
+            for acc in accounts {
+                if acc.sync_interval_secs == 0 {
+                    continue; // auto sync disabled
+                }
+                let due = {
+                    let last = self.last_attempt.lock().unwrap();
+                    match last.get(&acc.id) {
+                        Some(t) => now - t >= (acc.sync_interval_secs as i64) * 1000,
+                        None => true,
                     }
                 };
-                let now = now_ms();
-                for acc in accounts {
-                    if acc.sync_interval_secs == 0 {
-                        continue; // auto sync disabled
-                    }
-                    let due = {
-                        let last = engine.last_attempt.lock().unwrap();
-                        match last.get(&acc.id) {
-                            Some(t) => now - t >= (acc.sync_interval_secs as i64) * 1000,
-                            None => true,
+                if due {
+                    // Inside the running future, so a runtime is in context.
+                    let engine = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.sync_account(&acc.id).await {
+                            tracing::warn!("sync {} failed: {e}", acc.id);
                         }
-                    };
-                    if due {
-                        let engine = Arc::clone(&engine);
-                        tokio::spawn(async move {
-                            if let Err(e) = engine.sync_account(&acc.id).await {
-                                tracing::warn!("sync {} failed: {e}", acc.id);
-                            }
-                        });
-                    }
+                    });
                 }
             }
-        })
+        }
     }
 
     /// Fetch + classify one account. Returns number of new messages stored.
@@ -376,5 +378,116 @@ impl SyncEngine {
         self.act_on(&msg, &analysis, &settings, &channels).await;
         self.sink.mail_changed(&msg.account_id);
         Ok(analysis)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Records what the engine pushed to the UI.
+    #[derive(Default)]
+    struct RecordingSink {
+        changed: Mutex<Vec<String>>,
+    }
+
+    impl EventSink for Arc<RecordingSink> {
+        fn alert(&self, _: &AlertEvent) {}
+        fn mail_changed(&self, account_id: &str) {
+            self.changed.lock().unwrap().push(account_id.to_string());
+        }
+        fn sync_status(&self, _: &SyncStatus) {}
+    }
+
+    fn seeded_store() -> Arc<Store> {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_account(&AccountConfig {
+                id: "acc1".into(),
+                label: "Test".into(),
+                email: "me@example.com".into(),
+                protocol: Protocol::Imap,
+                host: "imap.example.com".into(),
+                port: 993,
+                username: "me@example.com".into(),
+                password: "secret".into(),
+                tls: TlsMode::Tls,
+                smtp: None,
+                sync_interval_secs: 0,
+                color_hue: 20,
+                created_at: 1,
+            })
+            .unwrap();
+        store
+            .insert_message(&EmailMessage {
+                id: "m1".into(),
+                account_id: "acc1".into(),
+                folder: "INBOX".into(),
+                uid: "1".into(),
+                message_id: Some("<m1@example.com>".into()),
+                subject: "Hello".into(),
+                from_name: "Alice".into(),
+                from_addr: "alice@example.com".into(),
+                to_addrs: vec!["me@example.com".into()],
+                date: 1000,
+                snippet: "Hi".into(),
+                body_text: Some("Hi".into()),
+                body_html: None,
+                attachments: vec![],
+                unread: true,
+                starred: false,
+                category: None,
+                analysis: None,
+                received_at: 1000,
+            })
+            .unwrap();
+        Arc::new(store)
+    }
+
+    /// A disabled/unconfigured AI filter must be a no-op, not an error — the
+    /// mail sync has to keep working before the user configures an LLM.
+    #[tokio::test]
+    async fn classify_pending_is_noop_without_ai() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        assert_eq!(engine.classify_pending().await.unwrap(), 0);
+
+        // Enabling without a key must still be a no-op rather than a failed call.
+        let mut ai = AiSettings::default();
+        ai.enabled = true;
+        store.set_ai_settings(&ai).unwrap();
+        assert_eq!(engine.classify_pending().await.unwrap(), 0);
+
+        // The message stays pending for a later, configured run.
+        assert_eq!(store.unclassified(10).unwrap().len(), 1);
+    }
+
+    /// Local-only delete must hide the message and tell the UI which account
+    /// changed — resolved before the row is hidden, not after.
+    #[tokio::test]
+    async fn local_delete_hides_message_and_reports_account() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(Arc::clone(&store), Box::new(Arc::clone(&sink)));
+
+        engine.delete_messages(&["m1".to_string()], false).await;
+
+        assert!(store.get_message("m1").is_err());
+        assert_eq!(store.query_messages(&MessageQuery::default()).unwrap().total, 0);
+        assert_eq!(sink.changed.lock().unwrap().as_slice(), ["acc1"]);
+    }
+
+    /// Reclassify surfaces a clear configuration error instead of calling out
+    /// to an unconfigured endpoint.
+    #[tokio::test]
+    async fn reclassify_requires_configured_ai() {
+        let store = seeded_store();
+        let sink = Arc::new(RecordingSink::default());
+        let engine = SyncEngine::new(store, Box::new(Arc::clone(&sink)));
+
+        let err = engine.reclassify("m1").await.unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig(_)), "got {err:?}");
     }
 }

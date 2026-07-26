@@ -81,7 +81,7 @@ pub fn run() {
             );
             let sink = Box::new(TauriSink { app: app.handle().clone() });
             let engine = SyncEngine::new(store, sink);
-            engine.start_scheduler();
+            tauri::async_runtime::spawn(engine.clone().run_scheduler());
             app.manage(AppState { engine });
             Ok(())
         })
