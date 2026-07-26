@@ -339,21 +339,37 @@ impl SyncEngine {
                 // will still be wrong immediately afterwards, and the retry
                 // belongs to the scheduler's backoff, not to this loop.
                 Err(_) => {
+                    // A failed pass clears the follow-up too: whatever is wrong
+                    // will still be wrong immediately afterwards, and the retry
+                    // belongs to the scheduler's backoff, not to this loop.
+                    let mut in_flight = self.in_flight.lock().unwrap();
                     self.resync.lock().unwrap().remove(account_id);
+                    in_flight.remove(account_id);
                     break;
                 }
             }
-            if !self.resync.lock().unwrap().remove(account_id) {
-                break;
+
+            // Deciding to stop and letting go of the slot has to be one step.
+            // Checking `resync` and then releasing separately leaves a gap: a
+            // wake arriving in it finds the slot still taken, leaves a marker,
+            // and returns — and then nobody is left to honour the marker, which
+            // loses exactly the live mail this loop exists to catch.
+            //
+            // `in_flight` is taken before `resync` here and on the requesting
+            // side too, so the two cannot deadlock against each other.
+            let mut in_flight = self.in_flight.lock().unwrap();
+            if self.resync.lock().unwrap().remove(account_id) {
+                drop(in_flight);
+                tracing::debug!("sync: {account_id} 期间又有新动静，继续同步");
+                continue;
             }
-            tracing::debug!("sync: {account_id} 期间又有新动静，继续同步");
+            in_flight.remove(account_id);
+            break;
         }
         // Report the whole run, not just its last pass.
         if result.is_ok() {
             result = Ok(total);
         }
-
-        self.in_flight.lock().unwrap().remove(account_id);
         match &result {
             Ok(n) => {
                 let n = *n;
@@ -598,12 +614,30 @@ impl SyncEngine {
             format!("{} <{}>", msg.from_name, msg.from_addr)
         };
 
-        // Whether a configured channel will carry this one. Computed before the
-        // popup so the shell can decide whether its own notification would be a
-        // duplicate rather than the only copy.
-        let routed = channels
-            .iter()
-            .any(|ch| ch.enabled && ch.notify_categories.contains(&analysis.category));
+        let payload = NotifyPayload {
+            category: analysis.category,
+            account_email: account_email.clone(),
+            from: from.clone(),
+            subject: msg.subject.clone(),
+            summary: analysis.summary.clone(),
+            verification_code: analysis.verification_code.clone(),
+            date: msg.date,
+        };
+
+        // External channels go first, and `routed` records what actually
+        // arrived rather than what was configured. Suppressing the desktop
+        // notification because a channel was *supposed* to carry this would
+        // mean a mail nobody hears about at all whenever Telegram is down —
+        // the one case where the local notification matters most.
+        let mut routed = false;
+        for ch in channels {
+            if ch.enabled && ch.notify_categories.contains(&analysis.category) {
+                match notify::dispatch(&self.http, ch, &payload).await {
+                    Ok(()) => routed = true,
+                    Err(e) => tracing::warn!("channel {} dispatch failed: {e}", ch.name),
+                }
+            }
+        }
 
         match analysis.category {
             Category::Verification | Category::Important => {
@@ -627,22 +661,6 @@ impl SyncEngine {
             Category::Normal => {}
         }
 
-        let payload = NotifyPayload {
-            category: analysis.category,
-            account_email,
-            from,
-            subject: msg.subject.clone(),
-            summary: analysis.summary.clone(),
-            verification_code: analysis.verification_code.clone(),
-            date: msg.date,
-        };
-        for ch in channels {
-            if ch.enabled && ch.notify_categories.contains(&analysis.category) {
-                if let Err(e) = notify::dispatch(&self.http, ch, &payload).await {
-                    tracing::warn!("channel {} dispatch failed: {e}", ch.name);
-                }
-            }
-        }
     }
 
     /// Delete messages locally (soft) and — when `on_server` — remotely too.
@@ -781,6 +799,37 @@ mod tests {
             engine.resync.lock().unwrap().contains("acc1"),
             "but it leaves a note so the running pass goes round again"
         );
+    }
+
+    /// Releasing the slot and deciding to stop must be one step.
+    ///
+    /// A wake arriving between "no follow-up wanted" and "slot released" used
+    /// to find the slot still taken, leave a marker, and return — with nobody
+    /// left to honour it. The loop now takes `in_flight` before checking
+    /// `resync`, so by the time the slot is free the marker cannot exist.
+    #[test]
+    fn releasing_the_slot_leaves_no_unhonoured_marker() {
+        let engine = SyncEngine::new(seeded_store(), Box::new(NullSink));
+        // The fetch path is wrapped in a timeout, so the runtime needs timers.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        // The account points at a host that does not exist, so the pass fails —
+        // which is the interesting path anyway: the error branch releases the
+        // slot too, and it has to leave the same clean state.
+        let _ = rt.block_on(engine.sync_account("acc1"));
+
+        // Nothing is syncing and nothing is owed. Those two have to agree, or a
+        // later wake is either dropped or serviced twice.
+        assert!(engine.in_flight.lock().unwrap().is_empty());
+        assert!(engine.resync.lock().unwrap().is_empty());
+
+        // And the slot really is free, so the next wake syncs rather than
+        // leaving a marker for a pass that is not running.
+        let _ = rt.block_on(engine.sync_account("acc1"));
+        assert!(engine.resync.lock().unwrap().is_empty());
+        assert!(engine.in_flight.lock().unwrap().is_empty());
     }
 
     /// The note is per-account: a busy mailbox must not drag an idle one into

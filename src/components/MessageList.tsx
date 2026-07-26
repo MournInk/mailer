@@ -219,8 +219,23 @@ export function MessageList() {
 
   const clearPicked = useCallback(() => setPicked(new Set()), []);
 
-  const allPicked = items.length > 0 && picked.size === items.length;
-  const somePicked = picked.size > 0 && !allPicked;
+  // Changing scope is starting again. Keeping the ticks would carry a selection
+  // the user can no longer see, which the batch bar would then act on.
+  useEffect(() => {
+    setPicked(new Set());
+    setAnchor(null);
+  }, [filter]);
+
+  // Intersected with what is actually on screen, never compared by size. A
+  // filter change swaps the rows out from under `picked`, and a stale set that
+  // merely happens to be the same length would show the header fully ticked and
+  // let a bulk action run against mail the new filter is hiding.
+  const pickedHere = useMemo(
+    () => items.filter((m) => picked.has(m.id)).map((m) => m.id),
+    [items, picked],
+  );
+  const allPicked = items.length > 0 && pickedHere.length === items.length;
+  const somePicked = pickedHere.length > 0 && !allPicked;
 
   /** The header box: none → all, some → all, all → none. */
   const toggleAll = useCallback(() => {
@@ -231,12 +246,11 @@ export function MessageList() {
 
   const bulk = useCallback(
     async (fn: (ids: string[]) => Promise<void>) => {
-      const ids = [...picked];
-      if (ids.length === 0) return;
-      await fn(ids);
+      if (pickedHere.length === 0) return;
+      await fn(pickedHere);
       clearPicked();
     },
-    [picked, clearPicked],
+    [pickedHere, clearPicked],
   );
 
   /** Menu for one row. Acts on the selection when the row is part of it. */
@@ -372,12 +386,12 @@ export function MessageList() {
       } else if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
         toggleAll();
-      } else if (e.key === "Escape" && picked.size > 0) {
+      } else if (e.key === "Escape" && pickedHere.length > 0) {
         e.preventDefault();
         clearPicked();
       }
     },
-    [items, cursorId, open, togglePick, toggleAll, picked.size, clearPicked],
+    [items, cursorId, open, togglePick, toggleAll, pickedHere.length, clearPicked],
   );
 
   // -- infinite scroll ------------------------------------------------------
@@ -488,9 +502,9 @@ export function MessageList() {
         </div>
       </header>
 
-      {picked.size > 0 && (
+      {pickedHere.length > 0 && (
         <div className="ml-selbar" role="toolbar" aria-label="批量操作">
-          <span className="ml-selbar-count">已选 {picked.size} 封</span>
+          <span className="ml-selbar-count">已选 {pickedHere.length} 封</span>
           <button className="btn" onClick={() => void bulk((ids) => markRead(ids, true))}>
             <Icon name="check" size={14} />
             标记已读
@@ -532,7 +546,7 @@ export function MessageList() {
         role="listbox"
         aria-label="邮件列表"
       >
-        <div className={`ml-rows${picked.size > 0 ? " ml-list-picking" : ""}`}>
+        <div className={`ml-rows${pickedHere.length > 0 ? " ml-list-picking" : ""}`}>
         {showSkeleton ? (
           <div className="ml-skeletons" aria-hidden>
             {Array.from({ length: SKELETON_ROWS }, (_, i) => (

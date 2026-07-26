@@ -298,10 +298,18 @@
    Gmail's rule. A column of empty boxes down a mailbox you are only reading is
    forty affordances for a thing you are not doing. */
 .ml-row-check {
+  /* Centred on the rail explicitly. Without coordinates an absolutely
+     positioned box falls back to its static position — beside the dot rather
+     than over it. `margin: auto` cannot do it either: the box is wider than the
+     rail, so the margins resolve to zero and it sits flush left. Translating
+     off its own centre works at any size and leaves the row's width alone. */
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 14px;
   height: 14px;
   margin: 0;
+  transform: translate(-50%, -50%);
   accent-color: var(--accent);
   opacity: 0;
   cursor: pointer;

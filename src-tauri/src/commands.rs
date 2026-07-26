@@ -1022,17 +1022,28 @@ fn insecure_endpoint(input: &McpServerInput) -> Option<String> {
     }
     let url = input.url.trim().to_ascii_lowercase();
     let rest = url.strip_prefix("http://")?;
+    // The authority ends at the first '/', '?' or '#'.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // `http://localhost:80@evil.example/` is a request to evil.example — the
+    // part that looks like loopback is userinfo, not the destination. Rather
+    // than try to read past it, refuse: nothing here needs to send credentials
+    // in the URL, and a URL that does is either a mistake or an attempt.
+    if authority.contains('@') {
+        return Some(format!(
+            "「{}」的地址里带了 @，无法确定真正的目标主机。请去掉地址中的用户名部分。",
+            input.name.trim()
+        ));
+    }
     // A bracketed IPv6 literal carries its own colons, so the port separator
     // cannot simply be the first one.
-    let host = match rest.strip_prefix('[') {
+    let host = match authority.strip_prefix('[') {
         Some(v6) => v6.split(']').next().map(|h| format!("[{h}]")).unwrap_or_default(),
-        None => rest.split(['/', ':', '?']).next().unwrap_or("").to_string(),
+        None => authority.split(':').next().unwrap_or("").to_string(),
     };
     let host = host.as_str();
     let local = host == "localhost"
         || host == "127.0.0.1"
         || host == "[::1]"
-        || host == "::1"
         || host.ends_with(".localhost");
     if local {
         return None;
@@ -1646,6 +1657,20 @@ mod tests {
         ] {
             let input = mcp_input(url, McpAuth::Bearer, McpTransport::Http);
             assert!(insecure_endpoint(&input).is_none(), "{url}");
+        }
+    }
+
+    /// The loopback exemption must not be reachable through userinfo: the part
+    /// before an `@` is a username, not the host the key would go to.
+    #[test]
+    fn a_loopback_lookalike_in_userinfo_does_not_earn_the_exemption() {
+        for url in [
+            "http://localhost:80@evil.example/mcp",
+            "http://127.0.0.1@evil.example/",
+            "http://user:pass@evil.example/mcp",
+        ] {
+            let input = mcp_input(url, McpAuth::Bearer, McpTransport::Http);
+            assert!(insecure_endpoint(&input).is_some(), "{url}");
         }
     }
 
