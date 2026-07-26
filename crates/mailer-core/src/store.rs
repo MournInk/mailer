@@ -179,6 +179,21 @@ CREATE TABLE IF NOT EXISTS memory_events (
 CREATE INDEX IF NOT EXISTS idx_memory_events_mem
     ON memory_events(memory_id, created_at DESC);
 
+-- Full-text index over the whole of every message.
+--
+-- The list search used to be `LIKE` over subject, sender and the 140-character
+-- snippet, so a word in the third paragraph of a mail was unfindable; the vector
+-- index only ever saw the first 1200 characters. Both of those are now backed by
+-- this.
+--
+-- `text` is not the mail: it is the mail run through `fts_index_text`, which
+-- explodes CJK into overlapping bigrams. FTS5's tokenizers cannot segment
+-- Chinese — unicode61 reads a whole run as one token, so 账单 inside 十月账单
+-- matches nothing, and trigram cannot match anything shorter than three
+-- characters, which rules out most Chinese words. Both sides of the search go
+-- through the same transform instead.
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(message_id UNINDEXED, text);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,
     title      TEXT NOT NULL DEFAULT '',
@@ -329,6 +344,15 @@ impl Store {
     pub fn delete_account(&self, id: &str) -> Result<()> {
         self.with(|c| {
             c.execute("DELETE FROM messages WHERE account_id=?1", params![id])?;
+            // A virtual table takes no foreign keys, so the index has to be
+            // swept by hand. Orphans could never match anything — every query
+            // joins `messages` — but they would keep the mail's text on disk
+            // after the account it belonged to was removed.
+            c.execute(
+                "DELETE FROM message_fts
+                  WHERE message_id NOT IN (SELECT id FROM messages)",
+                [],
+            )?;
             let n = c.execute("DELETE FROM accounts WHERE id=?1", params![id])?;
             if n == 0 {
                 return Err(Error::NotFound(format!("account {id}")));
@@ -358,7 +382,7 @@ impl Store {
     /// Insert a message unless a row with the same (account, folder, uid) —
     /// or same non-empty Message-ID — already exists. Returns true if inserted.
     pub fn insert_message(&self, m: &EmailMessage) -> Result<bool> {
-        self.with(|c| {
+        self.with_tx(|c| {
             if let Some(mid) = m.message_id.as_deref().filter(|s| !s.is_empty()) {
                 let dup: Option<String> = c
                     .query_row(
@@ -398,7 +422,93 @@ impl Store {
                     m.received_at,
                 ],
             )?;
+            if n > 0 {
+                // In the same transaction as the row. As a second call it was one
+                // `if let Err` away from a mailbox whose body text is unsearchable,
+                // and there is no reason for a caller to be able to get that wrong.
+                index_text(c, m)?;
+            }
             Ok(n > 0)
+        })
+    }
+
+    // -- full-text index ----------------------------------------------------
+
+    /// Index one message, replacing whatever was there.
+    ///
+    /// Called from the sync path right after the row lands. Kept separate from
+    /// `insert_message` so a re-parse or a body that arrived late can re-index
+    /// without touching the message row.
+    pub fn index_message_text(&self, m: &EmailMessage) -> Result<()> {
+        self.with_tx(|tx| index_text(tx, m))
+    }
+
+    pub fn unindex_message_text(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM message_fts WHERE message_id=?1", params![id])?;
+            Ok(())
+        })
+    }
+
+    /// Messages with no row in the index yet, newest first.
+    ///
+    /// The index arrived after the mailbox did, so an existing database has to be
+    /// backfilled. Bounded per call so the caller can drive it from a loop.
+    pub fn messages_missing_fts(&self, limit: u32) -> Result<Vec<EmailMessage>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT * FROM messages m
+                  WHERE m.deleted=0
+                    AND NOT EXISTS (SELECT 1 FROM message_fts f WHERE f.message_id = m.id)
+                  ORDER BY m.date DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit as i64], row_to_message)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// (indexed, total) for the full-text index.
+    pub fn fts_counts(&self) -> Result<(u32, u32)> {
+        self.with(|c| {
+            let total: i64 =
+                c.query_row("SELECT COUNT(*) FROM messages WHERE deleted=0", [], |r| r.get(0))?;
+            let indexed: i64 = c.query_row(
+                "SELECT COUNT(*) FROM message_fts f
+                  JOIN messages m ON m.id = f.message_id AND m.deleted=0",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok((indexed as u32, total as u32))
+        })
+    }
+
+    /// Message ids matching `query`, best first, by BM25 over the whole body.
+    ///
+    /// `Ok(None)` means the index cannot answer this query — a lone CJK
+    /// character, or nothing searchable at all — and the caller should fall back
+    /// to the substring path rather than report no results.
+    pub fn fts_search(&self, query: &str, limit: u32) -> Result<Option<Vec<String>>> {
+        let Some(expr) = fts_match_query(query) else {
+            return Ok(None);
+        };
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT f.message_id FROM message_fts f
+                  JOIN messages m ON m.id = f.message_id AND m.deleted=0
+                  WHERE message_fts MATCH ?1
+                  ORDER BY bm25(message_fts, 0.0, 1.0)
+                  LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![expr, limit as i64], |r| r.get::<_, String>(0));
+            match rows {
+                Ok(rows) => Ok(Some(rows.collect::<std::result::Result<Vec<_>, _>>()?)),
+                // A MATCH expression FTS5 rejects must not take the search down
+                // with it: the substring path answers instead.
+                Err(e) => {
+                    tracing::debug!("fts: 查询被拒绝，改用子串匹配: {e}");
+                    Ok(None)
+                }
+            }
         })
     }
 
@@ -519,20 +629,36 @@ impl Store {
                 where_sql.push_str(" AND starred=1");
             }
             if let Some(s) = q.search.as_deref().filter(|s| !s.trim().is_empty()) {
-                // The backslash goes first: escaping it after the wildcards
-                // would also escape the escapes we just added, and a search for
-                // a literal "\" would silently match nothing.
-                let pat = format!("%{}%", escape_like(s.trim()));
-                for _ in 0..3 {
-                    args.push(Box::new(pat.clone()));
+                match fts_match_query(s.trim()) {
+                    // The index reaches the whole body; the substring columns
+                    // never did. Used as a filter rather than as the ordering, so
+                    // the list stays newest-first — a mail list re-sorted by
+                    // relevance while you type is not a mail list.
+                    Some(expr) => {
+                        args.push(Box::new(expr));
+                        where_sql.push_str(&format!(
+                            " AND id IN (SELECT message_id FROM message_fts WHERE message_fts MATCH ?{})",
+                            args.len()
+                        ));
+                    }
+                    // A lone CJK character, which is not a token in a bigram
+                    // index. The backslash goes first when escaping: after the
+                    // wildcards it would also escape the escapes we just added,
+                    // and a search for a literal "\" would match nothing.
+                    None => {
+                        let pat = format!("%{}%", escape_like(s.trim()));
+                        for _ in 0..3 {
+                            args.push(Box::new(pat.clone()));
+                        }
+                        let n = args.len();
+                        where_sql.push_str(&format!(
+                            " AND (subject LIKE ?{} ESCAPE '\\' OR from_addr LIKE ?{} ESCAPE '\\' OR snippet LIKE ?{} ESCAPE '\\')",
+                            n - 2,
+                            n - 1,
+                            n
+                        ));
+                    }
                 }
-                let n = args.len();
-                where_sql.push_str(&format!(
-                    " AND (subject LIKE ?{} ESCAPE '\\' OR from_addr LIKE ?{} ESCAPE '\\' OR snippet LIKE ?{} ESCAPE '\\')",
-                    n - 2,
-                    n - 1,
-                    n
-                ));
             }
 
             let params_ref: Vec<&dyn rusqlite::types::ToSql> =
@@ -1435,6 +1561,191 @@ impl Store {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Full-text search
+// ---------------------------------------------------------------------------
+
+/// Longest run of CJK exploded into bigrams. A 200-page contract in Chinese
+/// would otherwise produce an index entry per character position; past this the
+/// tail of the mail is searchable by the vector index and by nothing else, which
+/// is the same deal every other mail client offers.
+const MAX_FTS_CHARS: usize = 20_000;
+
+/// Turn text into what the index actually stores.
+///
+/// Latin words and numbers survive as themselves. A CJK run becomes its
+/// overlapping bigrams, in order, so a phrase query of consecutive bigrams is
+/// exactly a substring match: 十月账单 indexes as `十月 月账 账单`, and a search
+/// for 账单 is one token. A single CJK character on its own is kept, because a
+/// one-character run has no bigram.
+pub fn fts_index_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    let mut run: Vec<char> = Vec::new();
+
+    let flush = |run: &mut Vec<char>, out: &mut String| {
+        match run.len() {
+            0 => {}
+            1 => push_token(out, &run[0].to_string()),
+            _ => {
+                for pair in run.windows(2) {
+                    push_token(out, &pair.iter().collect::<String>());
+                }
+            }
+        }
+        run.clear();
+    };
+
+    for ch in s.chars().take(MAX_FTS_CHARS) {
+        if is_cjk(ch) {
+            run.push(ch);
+        } else if ch.is_alphanumeric() {
+            flush(&mut run, &mut out);
+            // A Latin word is one token; FTS5's own tokenizer will split it on
+            // nothing, which is what we want.
+            out.push(ch);
+        } else {
+            flush(&mut run, &mut out);
+            push_space(&mut out);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+fn push_token(out: &mut String, token: &str) {
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out.push_str(token);
+    out.push(' ');
+}
+
+/// A separator, unless one is already there. FTS5 does not care about runs of
+/// whitespace, but a predictable transform is worth having in tests.
+fn push_space(out: &mut String) {
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
+    }
+}
+
+/// Turn what the user typed into an FTS5 `MATCH` expression, or `None` when this
+/// query cannot be answered by the index.
+///
+/// Every run becomes a quoted phrase and the phrases are ANDed, so "invoice 账单"
+/// wants both without requiring them to be adjacent. Quoting is not optional:
+/// FTS5 reads `*`, `:`, `^`, `-`, `(`, `)` and `"` as syntax, and an unquoted
+/// `42.00` is a syntax error rather than a search.
+///
+/// `None` for a query with nothing usable in it, and for a lone CJK character:
+/// the index holds bigrams, so a single character is not a token in it. The
+/// substring path still answers those.
+pub fn fts_match_query(query: &str) -> Option<String> {
+    let mut phrases: Vec<String> = Vec::new();
+    let mut run: Vec<char> = Vec::new();
+    let mut word = String::new();
+    let mut usable = true;
+
+    let flush_cjk = |run: &mut Vec<char>, phrases: &mut Vec<String>, usable: &mut bool| {
+        match run.len() {
+            0 => {}
+            1 => *usable = false, // one character: not a token in the index
+            _ => {
+                let bigrams: Vec<String> =
+                    run.windows(2).map(|p| p.iter().collect::<String>()).collect();
+                phrases.push(format!("\"{}\"", bigrams.join(" ")));
+            }
+        }
+        run.clear();
+    };
+
+    for ch in query.chars().take(MAX_FTS_CHARS) {
+        if is_cjk(ch) {
+            if !word.is_empty() {
+                phrases.push(format!("\"{word}\""));
+                word.clear();
+            }
+            run.push(ch);
+        } else if ch.is_alphanumeric() {
+            flush_cjk(&mut run, &mut phrases, &mut usable);
+            word.push(ch);
+        } else {
+            flush_cjk(&mut run, &mut phrases, &mut usable);
+            if !word.is_empty() {
+                phrases.push(format!("\"{word}\""));
+                word.clear();
+            }
+        }
+    }
+    flush_cjk(&mut run, &mut phrases, &mut usable);
+    if !word.is_empty() {
+        phrases.push(format!("\"{word}\""));
+    }
+
+    // A query that was partly unusable would silently search for less than the
+    // user asked, and quietly returning the wrong results is worse than handing
+    // the query to the substring path.
+    if phrases.is_empty() || !usable {
+        return None;
+    }
+
+    // The last phrase matches as a prefix, because the search box searches while
+    // the user is still typing: "stri" has to find Stripe, which a whole-token
+    // match never would. Harmless on a finished query — it also matches
+    // "invoices" — and a no-op on CJK, where every token is two characters.
+    if let Some(last) = phrases.last_mut() {
+        last.push('*');
+    }
+    Some(phrases.join(" AND "))
+}
+
+/// CJK ideographs plus the Japanese syllabaries — everything a tokenizer built
+/// for spaces cannot split.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF     // hiragana + katakana
+        | 0x3400..=0x4DBF   // CJK ext A
+        | 0x4E00..=0x9FFF   // CJK
+        | 0xF900..=0xFAFF   // compatibility ideographs
+        | 0x20000..=0x2FA1F // ext B and beyond
+    )
+}
+
+/// Write one message's index row, replacing whatever was there.
+fn index_text(c: &Connection, m: &EmailMessage) -> Result<()> {
+    // Deleting by an UNINDEXED column is a scan of the FTS table rather than a
+    // lookup. The alternative is keying on `messages.rowid`, which `VACUUM` is
+    // entitled to renumber — a wrong row is worse than a slow delete on a path
+    // that runs once per message.
+    c.execute("DELETE FROM message_fts WHERE message_id=?1", params![m.id])?;
+    c.execute(
+        "INSERT INTO message_fts (message_id, text) VALUES (?1, ?2)",
+        params![m.id, fts_index_text(&searchable_text(m))],
+    )?;
+    Ok(())
+}
+
+/// Everything about a message worth searching, in one string.
+fn searchable_text(m: &EmailMessage) -> String {
+    let mut s = String::new();
+    for part in [
+        m.subject.as_str(),
+        m.from_name.as_str(),
+        m.from_addr.as_str(),
+        m.body_text.as_deref().unwrap_or(""),
+    ] {
+        if !part.is_empty() {
+            s.push_str(part);
+            s.push('\n');
+        }
+    }
+    // The snippet is derived from the body for text mail, but for an HTML-only
+    // mail it is the only plain text there is.
+    if m.body_text.as_deref().unwrap_or("").is_empty() {
+        s.push_str(&m.snippet);
+    }
+    s
+}
+
 /// Escape the three characters `LIKE ... ESCAPE '\'` treats specially.
 ///
 /// The backslash has to go first. Escaping it last would double the escapes
@@ -1849,6 +2160,125 @@ mod tests {
         .unwrap();
         assert!(s.conversation_exists("c1").unwrap());
         assert!(!s.conversation_exists("c2").unwrap());
+    }
+
+    /// The index format. FTS5 cannot segment Chinese, so both sides of the
+    /// search go through this: 十月账单 becomes `十月 月账 账单`, and a phrase
+    /// query of consecutive bigrams is then exactly a substring match.
+    #[test]
+    fn cjk_is_indexed_as_bigrams_and_latin_as_words() {
+        assert_eq!(fts_index_text("十月账单").trim(), "十月 月账 账单");
+        assert_eq!(fts_index_text("Stripe invoice").trim(), "Stripe invoice");
+        assert_eq!(fts_index_text("发票 42.00 元").trim(), "发票 42 00 元");
+        // A one-character run has no bigram, so it is kept as itself.
+        assert_eq!(fts_index_text("A 型").trim(), "A 型");
+        assert_eq!(fts_index_text("").trim(), "");
+    }
+
+    /// FTS5 reads `*`, `:`, `^`, `-` and `"` as syntax, so an unquoted query is a
+    /// syntax error rather than a search. Everything is quoted, and a query the
+    /// index cannot answer says so instead of matching nothing.
+    #[test]
+    fn a_query_is_quoted_or_refused() {
+        // The trailing `*` is what keeps search-as-you-type working.
+        assert_eq!(fts_match_query("十月账单").unwrap(), "\"十月 月账 账单\"*");
+        assert_eq!(fts_match_query("invoice").unwrap(), "\"invoice\"*");
+        // Two runs want both, without demanding they sit next to each other.
+        assert_eq!(fts_match_query("账单 invoice").unwrap(), "\"账单\" AND \"invoice\"*");
+        // Punctuation is a separator, never syntax.
+        assert_eq!(fts_match_query("42.00").unwrap(), "\"42\" AND \"00\"*");
+        for hostile in ["\"", "*", "a OR b -c", "NEAR(x y)"] {
+            let expr = fts_match_query(hostile);
+            if let Some(expr) = &expr {
+                // Every part is a quoted phrase, so nothing the user typed can
+                // reach FTS5 as an operator.
+                assert!(
+                    expr.split(" AND ")
+                        .all(|p| p.starts_with('"') && p.trim_end_matches('*').ends_with('"')),
+                    "{hostile:?} produced {expr}"
+                );
+            }
+        }
+        // A lone CJK character is not a token in a bigram index.
+        assert!(fts_match_query("账").is_none());
+        assert!(fts_match_query("查 一").is_none());
+        assert!(fts_match_query("   ").is_none());
+        assert!(fts_match_query("!!!").is_none());
+    }
+
+    /// The point of the whole thing: a word buried in a long body is findable.
+    /// The old search covered subject, sender and a 140-character snippet.
+    #[test]
+    fn the_full_text_index_reaches_the_middle_of_a_long_body() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+
+        let mut m = sample_message("m1", "1");
+        m.subject = "月度对账单".into();
+        m.snippet = "开头的一段话".into();
+        m.body_text = Some(format!(
+            "{}\n订单号 SO-99182 的退款已经处理\n{}",
+            "无关的内容。".repeat(200),
+            "后面还有很多。".repeat(200)
+        ));
+        s.insert_message(&m).unwrap();
+
+        let hits = |q: &str| s.fts_search(q, 10).unwrap().unwrap_or_default();
+        assert_eq!(hits("SO-99182"), vec!["m1"], "an id deep in the body");
+        assert_eq!(hits("SO-991"), vec!["m1"], "and while it is still being typed");
+        assert_eq!(hits("退款"), vec!["m1"], "two Chinese characters mid-body");
+        assert_eq!(hits("对账单"), vec!["m1"], "the subject still works");
+        assert!(hits("不存在的词").is_empty());
+
+        // And the list view finds it too, which is the user-visible half.
+        let page = s
+            .query_messages(&MessageQuery {
+                search: Some("SO-99182".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total, 1);
+
+        // A deleted message leaves the index, without the row being swept.
+        s.soft_delete(&["m1".to_string()]).unwrap();
+        assert!(hits("退款").is_empty(), "a deleted mail must not come back");
+    }
+
+    /// A mailbox that predates the index has to be backfillable. New mail is
+    /// indexed with its row, so the only way to be in that state is to have been
+    /// upgraded — simulated here by emptying the index.
+    #[test]
+    fn messages_without_an_index_row_are_reported_for_backfill() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_account(&sample_account()).unwrap();
+        for i in 0..3 {
+            let mut m = sample_message(&format!("m{i}"), &format!("{i}"));
+            m.message_id = Some(format!("<m{i}@x>"));
+            m.body_text = Some(format!("正文 {i} 提到了 widget"));
+            s.insert_message(&m).unwrap();
+        }
+        assert_eq!(s.fts_counts().unwrap(), (3, 3), "new mail is indexed as it lands");
+
+        s.with(|c| {
+            c.execute("DELETE FROM message_fts", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(s.fts_counts().unwrap(), (0, 3));
+        assert_eq!(s.messages_missing_fts(10).unwrap().len(), 3);
+
+        for m in s.messages_missing_fts(2).unwrap() {
+            s.index_message_text(&m).unwrap();
+        }
+        assert_eq!(s.fts_counts().unwrap(), (2, 3));
+        assert_eq!(s.messages_missing_fts(10).unwrap().len(), 1);
+
+        // Re-indexing replaces rather than duplicating.
+        let m = s.get_message("m0").unwrap();
+        s.index_message_text(&m).unwrap();
+        assert_eq!(s.fts_counts().unwrap(), (2, 3));
+        assert_eq!(s.fts_search("widget", 10).unwrap().unwrap().len(), 2);
     }
 
     #[test]

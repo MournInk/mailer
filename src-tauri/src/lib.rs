@@ -87,6 +87,11 @@ pub fn run() {
             let sink = Box::new(TauriSink { app: app.handle().clone() });
             let engine = SyncEngine::new(store, sink);
             tauri::async_runtime::spawn(engine.clone().run_scheduler());
+            // The full-text index arrived after the mailbox did, so a database
+            // from an earlier build has mail in it that nothing has indexed.
+            // Purely local work — no endpoint, no key, no cost — so it runs
+            // itself rather than waiting to be asked.
+            tauri::async_runtime::spawn(commands::backfill_text_index(engine.clone()));
             app.manage(AppState {
                 engine,
                 index: Arc::default(),

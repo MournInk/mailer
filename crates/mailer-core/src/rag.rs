@@ -610,6 +610,17 @@ pub async fn search(
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored.truncate(candidates);
 
+    // Hybrid: the keyword index gets a vote too.
+    //
+    // Embedding search is bad at exactly what mail is full of — an order number,
+    // a verification code, a product name, an address — and the published
+    // comparisons keep finding BM25 competitive with or better than dense
+    // retrieval on that kind of lookup. Neither is reliably better, so both
+    // rankings are fused rather than one being chosen.
+    if let Some(keyword_ids) = store.fts_search(query, candidates as u32)? {
+        scored = fuse(scored, &keyword_ids, candidates);
+    }
+
     // One batch rather than a query per candidate: `candidates` runs to 200.
     // A message deleted between the vector scan and here is simply absent, so
     // the similarity it was scored with has to be looked up by id, not by
@@ -658,9 +669,80 @@ pub async fn search(
         .collect())
 }
 
-/// Substring search over subject / sender / snippet — the answer whenever the
-/// vector index cannot give one.
+/// Merge two rankings by reciprocal rank fusion.
+///
+/// RRF scores a document by `Σ 1/(k + rank)` across the rankings it appears in,
+/// which needs no calibration between them — and a cosine similarity and a BM25
+/// score have no common scale to calibrate. `k` damps the top of each list so one
+/// ranking cannot win on its first result alone; 60 is the value the original
+/// paper used and everything since has copied.
+///
+/// The result is still (id, score) sorted best-first, because that is what the
+/// caller does with it; the scores are no longer similarities and nothing
+/// downstream treats them as one.
+fn fuse(vector: Vec<(String, f32)>, keyword: &[String], keep: usize) -> Vec<(String, f32)> {
+    const K: f32 = 60.0;
+    let mut fused: Vec<(String, f32)> = Vec::with_capacity(vector.len() + keyword.len());
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    let mut add = |id: &str, rank: usize, fused: &mut Vec<(String, f32)>| {
+        let score = 1.0 / (K + rank as f32);
+        match index.get(id) {
+            Some(&i) => fused[i].1 += score,
+            None => {
+                index.insert(id.to_string(), fused.len());
+                fused.push((id.to_string(), score));
+            }
+        }
+    };
+
+    for (rank, (id, _)) in vector.iter().enumerate() {
+        add(id, rank, &mut fused);
+    }
+    for (rank, id) in keyword.iter().enumerate() {
+        add(id, rank, &mut fused);
+    }
+
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1));
+    fused.truncate(keep);
+    fused
+}
+
+/// Keyword search — the answer whenever the vector index cannot give one, and
+/// half of the answer when it can.
+///
+/// BM25 over the full-text index first, which reaches the whole body and ranks
+/// by relevance; `query_messages` after it, for the queries the index cannot
+/// answer. The old version searched subject, sender and a 140-character snippet
+/// and nothing else, so with embeddings switched off the assistant could not find
+/// a word in the third paragraph of a mail it had in front of it.
 fn keyword_search(store: &Store, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
+    if let Some(ids) = store.fts_search(query, limit)? {
+        if !ids.is_empty() {
+            let total = ids.len() as f32;
+            return Ok(store
+                .get_messages(&ids)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, msg)| {
+                    let text = truncate_chars(&body_text(&msg), DOC_CHARS);
+                    SearchHit {
+                        excerpt: excerpt_for(&text, query),
+                        // Best-first from BM25, mapped onto the same descending
+                        // scale the substring path reports.
+                        score: 1.0 - i as f32 / total,
+                        message_id: msg.id,
+                        account_id: msg.account_id,
+                        subject: msg.subject,
+                        from_name: msg.from_name,
+                        from_addr: msg.from_addr,
+                        date: msg.date,
+                    }
+                })
+                .collect());
+        }
+    }
+
     let page = store.query_messages(&MessageQuery {
         search: Some(query.to_string()),
         limit,
@@ -1834,6 +1916,53 @@ mod tests {
         assert_eq!(hits[0].message_id, "m1");
         assert_eq!(hits[0].subject, "10 月账单");
         assert!(hits[0].score > 0.0);
+    }
+
+    /// With embeddings off, the keyword path is the whole answer — and it used to
+    /// see only the subject, the sender and a 140-character snippet. A number in
+    /// the middle of a long mail was unfindable by the assistant holding it.
+    #[test]
+    fn the_keyword_path_reaches_the_whole_body() {
+        let store = store_with_mail();
+        let mut long = msg("m3", "服务变更通知", None, None);
+        long.snippet = "尊敬的用户".into();
+        long.body_text = Some(format!(
+            "{}\n工单编号 TK-77321 已经关闭\n{}",
+            "客套话。".repeat(150),
+            "此致敬礼。".repeat(150)
+        ));
+        store.insert_message(&long).unwrap();
+
+        let hits = keyword_search(&store, "TK-77321", 5).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].message_id, "m3");
+        // And the excerpt quotes the part that matched, not the opening.
+        assert!(hits[0].excerpt.contains("TK-77321"), "{}", hits[0].excerpt);
+
+        let cn = keyword_search(&store, "工单编号", 5).unwrap();
+        assert_eq!(cn.len(), 1, "两个以上汉字要能命中正文: {cn:?}");
+    }
+
+    /// Neither ranking is reliably better, so both vote. Fusion has to keep what
+    /// both found at the top, and must not drop what only one of them found.
+    #[test]
+    fn fusion_prefers_what_both_rankings_found() {
+        let vector = vec![
+            ("only-vector".to_string(), 0.9),
+            ("both".to_string(), 0.5),
+        ];
+        let keyword = vec!["only-keyword".to_string(), "both".to_string()];
+
+        let fused = fuse(vector, &keyword, 10);
+        let order: Vec<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(order[0], "both", "agreement wins: {order:?}");
+        assert_eq!(order.len(), 3, "nothing is dropped: {order:?}");
+        assert!(order.contains(&"only-vector") && order.contains(&"only-keyword"));
+
+        // The cap is honoured, and a single ranking survives fusion unchanged.
+        assert_eq!(fuse(vec![("a".into(), 1.0)], &[], 10).len(), 1);
+        assert_eq!(fuse(vec![], &["a".to_string(), "b".to_string()], 1).len(), 1);
+        assert!(fuse(vec![], &[], 10).is_empty());
     }
 
     /// With embeddings switched off, `search` answers from the store alone —

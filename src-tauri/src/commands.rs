@@ -570,6 +570,76 @@ pub fn set_reranker_settings(
 }
 
 // ---------------------------------------------------------------------------
+// Full-text index
+// ---------------------------------------------------------------------------
+
+/// Messages indexed per pass. The work is local and fast, but it holds the store
+/// mutex for the batch, so it is kept short enough not to be felt in the UI.
+const TEXT_BATCH: u32 = 200;
+
+/// Index whatever the full-text index has not seen yet, then stop.
+///
+/// New mail is indexed as it lands, so this only ever has work to do on a
+/// database written by a build that predates the index. Yields between batches:
+/// a 20 000-message mailbox is a few seconds of work and the window has to stay
+/// responsive through it.
+pub async fn backfill_text_index(engine: std::sync::Arc<SyncEngine>) {
+    let store = engine.store();
+    let (indexed, total) = match store.fts_counts() {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::warn!("text index: 无法读取索引状态: {e}");
+            return;
+        }
+    };
+    if indexed >= total {
+        return;
+    }
+    tracing::info!("text index: 正在补全 {} 封旧邮件的全文索引", total - indexed);
+
+    let mut done = indexed;
+    loop {
+        let batch = match store.messages_missing_fts(TEXT_BATCH) {
+            Ok(batch) => batch,
+            Err(e) => {
+                tracing::warn!("text index: 读取待索引邮件失败: {e}");
+                return;
+            }
+        };
+        if batch.is_empty() {
+            break;
+        }
+        for msg in &batch {
+            if let Err(e) = store.index_message_text(msg) {
+                // One unindexable message must not take the pass down with it.
+                tracing::warn!("text index: {} 索引失败: {e}", msg.id);
+            }
+        }
+
+        // A message that fails stays "missing", so it comes back in the next
+        // batch — without this the pass would retry it forever. Progress is
+        // measured, not assumed.
+        let progressed = match store.fts_counts() {
+            Ok((now, _)) => {
+                let moved = now > done;
+                done = now;
+                moved
+            }
+            Err(e) => {
+                tracing::warn!("text index: 无法确认进度: {e}");
+                false
+            }
+        };
+        if !progressed {
+            tracing::warn!("text index: 有 {} 封邮件无法索引，已跳过", batch.len());
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    tracing::info!("text index: 完成，{done}/{total}");
+}
+
+// ---------------------------------------------------------------------------
 // MCP servers (outbound: what the assistant may borrow)
 // ---------------------------------------------------------------------------
 
