@@ -132,6 +132,10 @@
   overflow-x: hidden;
   outline: none;
 }
+/* the cursor row carries the focus affordance, not the whole container */
+.ml-scroll:focus-visible {
+  box-shadow: none;
+}
 
 /* -- row ------------------------------------------------------------------- */
 
