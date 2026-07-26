@@ -1,0 +1,19 @@
+# Node
+node_modules/
+dist/
+
+# Rust
+target/
+
+# Tauri
+src-tauri/gen/schemas/
+
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# Local databases created during development
+*.db
+*.sqlite

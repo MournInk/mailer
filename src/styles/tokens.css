@@ -1,0 +1,135 @@
+/* ==========================================================================
+   Mailer design tokens — "Paper & Ink"
+
+   Influences:
+   - Anthropic/Claude: warm cream paper, terracotta accent, serif display
+   - Stripe: crisp borders, tight type scale, purposeful shadows
+   - OpenAI / ElevenLabs: restrained monochrome UI chrome
+   - Grok/xAI: near-black, high-contrast dark mode
+   ========================================================================== */
+
+:root {
+  /* type */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    Inter, Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", sans-serif;
+  --font-display: "Tiempos Headline", "Source Serif 4", "Songti SC", Georgia,
+    "Times New Roman", serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
+    Menlo, Consolas, monospace;
+
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+
+  /* geometry */
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* light — warm paper */
+  --bg: #f4f1ea;
+  --bg-raised: #faf8f3;
+  --surface: #ffffff;
+  --surface-2: #eceadf;
+  --surface-hover: rgba(25, 24, 23, 0.045);
+  --surface-active: rgba(25, 24, 23, 0.08);
+
+  --ink: #1c1a17;
+  --ink-2: #57534a;
+  --ink-3: #8f897c;
+  --ink-faint: #b5afa2;
+
+  --line: #e2ded2;
+  --line-strong: #cfc9ba;
+
+  --accent: #c15f3c;
+  --accent-hover: #a94f2f;
+  --accent-ink: #ffffff;
+  --accent-soft: #f6e4da;
+  --accent-soft-ink: #8a3d22;
+
+  --ok: #3d7a5d;
+  --ok-soft: #dcebe2;
+  --warn: #a3742a;
+  --warn-soft: #f2e7d0;
+  --danger: #b3402f;
+  --danger-soft: #f4ddd8;
+
+  /* category hues */
+  --cat-verification: #6d5bd0;
+  --cat-verification-soft: #e8e4f8;
+  --cat-important: #c15f3c;
+  --cat-important-soft: #f6e4da;
+  --cat-spam: #8f897c;
+  --cat-spam-soft: #eae7dd;
+  --cat-normal: #57534a;
+  --cat-normal-soft: #e8e5da;
+
+  --shadow-sm: 0 1px 2px rgba(28, 26, 23, 0.06);
+  --shadow-md: 0 2px 8px rgba(28, 26, 23, 0.08), 0 1px 2px rgba(28, 26, 23, 0.05);
+  --shadow-lg: 0 12px 40px rgba(28, 26, 23, 0.16), 0 2px 8px rgba(28, 26, 23, 0.08);
+
+  --focus-ring: 0 0 0 3px rgba(193, 95, 60, 0.28);
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  /* dark — warm near-black (xAI-style contrast, Claude warmth) */
+  --bg: #141210;
+  --bg-raised: #191715;
+  --surface: #1e1b19;
+  --surface-2: #26221f;
+  --surface-hover: rgba(245, 241, 232, 0.05);
+  --surface-active: rgba(245, 241, 232, 0.09);
+
+  --ink: #f0ece3;
+  --ink-2: #b0a99b;
+  --ink-3: #7d776b;
+  --ink-faint: #555047;
+
+  --line: #2c2823;
+  --line-strong: #3b352e;
+
+  --accent: #d97757;
+  --accent-hover: #e28b6d;
+  --accent-ink: #1a0e08;
+  --accent-soft: #3a251c;
+  --accent-soft-ink: #eda284;
+
+  --ok: #6fb392;
+  --ok-soft: #1e2f27;
+  --warn: #d0a355;
+  --warn-soft: #322917;
+  --danger: #d96b58;
+  --danger-soft: #38201b;
+
+  --cat-verification: #9d8df2;
+  --cat-verification-soft: #292345;
+  --cat-important: #d97757;
+  --cat-important-soft: #3a251c;
+  --cat-spam: #7d776b;
+  --cat-spam-soft: #26231e;
+  --cat-normal: #b0a99b;
+  --cat-normal-soft: #282520;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 10px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+
+  --focus-ring: 0 0 0 3px rgba(217, 119, 87, 0.35);
+
+  color-scheme: dark;
+}

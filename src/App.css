@@ -1,0 +1,30 @@
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.mail-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 232px minmax(300px, 380px) 1fr;
+}
+
+/* Narrow windows / mobile: collapse to list + detail overlay pattern.
+   (The list pane stays primary; the reading pane slides over it.) */
+@media (max-width: 900px) {
+  .mail-layout {
+    grid-template-columns: 64px minmax(240px, 1fr);
+  }
+  .mail-layout .message-view-pane {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: var(--bg-raised);
+  }
+  .mail-layout .message-view-pane.hidden-mobile {
+    display: none;
+  }
+}
