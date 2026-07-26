@@ -109,10 +109,13 @@ function buildConfig(draft: Draft): Record<string, unknown> {
         const key = row.key.trim();
         if (key) headers[key] = row.value.trim();
       }
+      // the template is sent verbatim (whitespace can be meaningful), but a
+      // blank one must be omitted so the backend falls back to raw JSON
+      const template = draft.cfg.bodyTemplate ?? "";
       return {
         url: v("url"),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
-        ...opt("bodyTemplate", draft.cfg.bodyTemplate ?? ""),
+        ...(template.trim() ? { bodyTemplate: template } : {}),
       };
     }
   }
@@ -199,7 +202,7 @@ export function ChannelForm({
 
   return (
     <form
-      className="card set-section set-form fade-up"
+      className="card set-section fade-up"
       onSubmit={(e) => {
         e.preventDefault();
         submit();

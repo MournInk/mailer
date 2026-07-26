@@ -282,7 +282,7 @@ export function AccountForm({
 
   return (
     <form
-      className="card set-section set-form fade-up"
+      className="card set-section fade-up"
       onSubmit={(e) => {
         e.preventDefault();
         void save();
