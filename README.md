@@ -72,7 +72,9 @@ npm run tauri ios dev
 
 两处需要你自己补齐凭据才能产出可分发的包：
 
-- **iOS**：生成 `.ipa` 必须有 Apple 签名身份（开发者账号 + 证书 + provisioning profile）。工作流不携带这些，因此 iOS job 只做「关闭签名、编译模拟器目标」的验证——它能证明 Rust 与前端在 iOS 上编译链接通过，但不是安装包。要出真包，需把证书与描述文件放进仓库 secrets 并改用 `xcodebuild archive` + `-exportArchive`。
+- **iOS**：生成 `.ipa` 必须有 Apple 签名身份（开发者账号 + 证书 + provisioning profile）。工作流不携带这些，所以 iOS job 只验证我们自己掌控的部分：前端产物构建，以及 Rust 库对真机（`aarch64-apple-ios`）和模拟器（`aarch64-apple-ios-sim`）两个目标编译链接通过。打包不在范围内。
+
+  绕开签名直接跑 `xcodebuild` 也不行——Tauri 生成的 Xcode 工程里有一个 "Build Rust Code" 阶段会调用 `tauri ios xcode-script`，它在 Debug 配置下要读 `tauri ios dev` 才会写入的 dev-server 地址文件，找不到就中止。要出真包，需把证书与描述文件放进仓库 secrets，再走 `xcodebuild archive` + `-exportArchive`。
 - **Android**：未签名的 release APK 无法安装，而仓库中没有 keystore，所以产物是 debug 构建。上架前需添加 keystore secrets，在 `gen/android` 中配置签名，并把构建命令的 `--debug` 换成 `--release`。
 
 `.github/workflows/ci.yml` 则在每次 push / PR 上跑核心测试（三大桌面平台）、前端构建与 Tauri 桌面端编译检查。

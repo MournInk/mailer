@@ -113,12 +113,21 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          local-cache: true
+      # The runner image ships an NDK already. Fetching one with
+      # nttld/setup-ndk + local-cache restored a toolchain whose
+      # aarch64-linux-android*-clang wrapper pointed at a `clang` the cache had
+      # dropped, so every cc-rs compile died with status 127.
+      - name: Locate the runner's NDK
+        run: |
+          set -euo pipefail
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          if [ -z "$ndk" ] || [ ! -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+            echo "No usable NDK on this runner (looked at '$ndk')" >&2
+            exit 1
+          fi
+          echo "Using NDK at $ndk"
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -132,18 +141,12 @@ jobs:
 
       # gen/android is generated, not committed, so it has to be created here.
       - name: Initialize Android project
-        env:
-          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: npm run tauri android init -- --ci
 
       # An unsigned release APK cannot be installed, and this workflow carries
       # no keystore, so the artifact is the debug-signed build. Shipping to a
       # store means adding a keystore and switching this to `--release`.
       - name: Build APK
-        env:
-          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: npm run tauri android build -- --debug --apk
 
       - name: Collect APK
@@ -154,7 +157,7 @@ jobs:
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
-    name: iOS (compile check)
+    name: iOS (Rust compile check)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -174,31 +177,25 @@ jobs:
 
       - run: npm ci
 
-      - name: Initialize iOS project
-        run: npm run tauri ios init -- --ci
-
+      # What this job can and cannot prove:
+      #
       # A distributable .ipa needs an Apple signing identity, which this
-      # workflow deliberately does not carry. Building the simulator target
-      # with signing disabled still proves the Rust and web layers compile and
-      # link for iOS — which is what this job is for. The project name and
-      # scheme are discovered rather than assumed, since both follow
-      # productName and its casing.
-      - name: Build for simulator without signing
+      # workflow deliberately does not carry. Driving the generated Xcode
+      # project directly does not substitute for it either — Tauri's "Build
+      # Rust Code" phase shells out to `tauri ios xcode-script`, which in a
+      # Debug build expects the dev-server address file that only `tauri ios
+      # dev` writes, so it aborts.
+      #
+      # So this job verifies the layers we actually own: the web bundle builds,
+      # and the Rust library compiles and links for both a real device and the
+      # simulator. Packaging is out of scope until signing material exists.
+      - name: Build web assets
+        run: npm run build
+
+      - name: Compile the Rust library for iOS
         run: |
-          set -euo pipefail
-          npm run build
-          project=$(ls -d src-tauri/gen/apple/*.xcodeproj | head -1)
-          scheme=$(xcodebuild -project "$project" -list \
-            | awk '/Schemes:/{found=1; next} found && NF {print $1; exit}')
-          echo "Building $project (scheme $scheme)"
-          xcodebuild \
-            -project "$project" \
-            -scheme "$scheme" \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+          cargo build --package mailer --lib --target aarch64-apple-ios
+          cargo build --package mailer --lib --target aarch64-apple-ios-sim
 
   release:
     name: Publish release

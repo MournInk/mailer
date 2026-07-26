@@ -1,0 +1,184 @@
+/* Onboarding — the first-run landing screen. Centered column, ~560px wide,
+   with a single soft accent wash behind it. */
+
+.onboarding {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 48px 24px;
+  background: var(--bg);
+}
+
+/* the only decorative element in the app: a faint warm halo behind the copy */
+.onboarding::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    58% 42% at 50% 0%,
+    color-mix(in srgb, var(--accent) 9%, transparent),
+    transparent 72%
+  );
+}
+
+.onboard-inner {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  margin: auto;
+}
+
+/* -- head ------------------------------------------------------------------ */
+
+.onboard-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 26px;
+}
+
+.onboard-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+}
+
+.onboard-wordmark {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+/* -- promise --------------------------------------------------------------- */
+
+.onboard-title {
+  font-family: var(--font-display);
+  /* scales down on narrow windows without leaving the type scale */
+  font-size: clamp(var(--text-xl), 7vw, var(--text-2xl));
+  font-weight: 500;
+  line-height: 1.24;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.onboard-sub {
+  margin-top: 12px;
+  max-width: 46ch;
+  font-size: var(--text-md);
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+/* -- feature cards --------------------------------------------------------- */
+
+.onboard-features {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 34px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboard-feature {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+.onboard-feature:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.onboard-feature-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.onboard-feature-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.onboard-feature-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.onboard-feature-body {
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
+/* -- actions --------------------------------------------------------------- */
+
+.onboard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 30px;
+}
+
+.onboard-cta {
+  height: 40px;
+  padding: 0 18px;
+  font-size: var(--text-md);
+}
+
+.onboard-note {
+  margin-top: 22px;
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--ink-faint);
+}
+
+/* -- narrow windows -------------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .onboarding {
+    padding: 32px 18px;
+    align-items: flex-start;
+  }
+  .onboard-features {
+    margin-top: 28px;
+  }
+  .onboard-actions {
+    margin-top: 26px;
+  }
+  /* full-width stacked buttons read better under the thumb */
+  .onboard-cta {
+    flex: 1 1 100%;
+  }
+}
