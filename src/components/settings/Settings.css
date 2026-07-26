@@ -1020,6 +1020,161 @@
   line-height: 1.65;
 }
 
+/* -- privacy --------------------------------------------------------------- */
+
+.pv-totals {
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+
+.pv-total {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pv-total-num {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.pv-total-label {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+
+/* Weeks read down, days across — the shape everybody already knows how to
+   read. Scrolls rather than shrinking: a cell below 9px stops being a cell. */
+.pv-heat {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.pv-heat-week {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pv-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+/* Five steps of one hue. The empty cell is a surface, not a colour, so a quiet
+   fortnight looks like nothing happened rather than like something did. */
+.pv-l0 {
+  background: var(--surface-2);
+}
+.pv-l1 {
+  background: color-mix(in oklab, var(--accent) 22%, var(--surface-2));
+}
+.pv-l2 {
+  background: color-mix(in oklab, var(--accent) 45%, var(--surface-2));
+}
+.pv-l3 {
+  background: color-mix(in oklab, var(--accent) 70%, var(--surface-2));
+}
+.pv-l4 {
+  background: var(--accent);
+}
+
+.pv-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+.pv-legend-label {
+  margin: 0 2px;
+}
+
+.pv-legend-peak {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.pv-top {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pv-top-head {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.pv-top-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pv-top-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.pv-top-host {
+  flex: 1 1 40%;
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The bar is the comparison; the number is the fact. Both, because a bar alone
+   cannot be read off and a number alone cannot be ranked at a glance. */
+.pv-top-bar {
+  flex: 1 1 30%;
+  min-width: 40px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.pv-top-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.pv-top-count {
+  flex-shrink: 0;
+  min-width: 3ch;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
 /* -- external tools (MCP) -------------------------------------------------- */
 
 /* Presets in the empty state: two wide rows rather than a grid, because the

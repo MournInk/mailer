@@ -148,6 +148,13 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
     </>
   ),
+  chart: (
+    <>
+      <path d="M3 3v16a2 2 0 0 0 2 2h16" />
+      <rect x="7" y="12" width="3" height="5" rx="1" />
+      <rect x="13" y="8" width="3" height="9" rx="1" />
+    </>
+  ),
   clock: (
     <>
       <circle cx="12" cy="12" r="9" />

@@ -32,11 +32,14 @@ import type {
   MessageQuery,
   NotifyChannel,
   OutgoingMail,
+  PrivacySettings,
   RerankerSettingsInput,
   RerankerSettingsPublic,
   SearchHit,
   SyncStatus,
   TestResult,
+  TrackerHit,
+  TrackerStats,
 } from "./types";
 
 // -- shell ------------------------------------------------------------------
@@ -122,6 +125,17 @@ export const deleteMcpServer = (id: string) =>
 export const mcpStatus = () => invoke<McpServerStatus[]>("mcp_status");
 /** Drop every cached session and connect again from scratch. */
 export const reconnectMcp = () => invoke<McpServerStatus[]>("reconnect_mcp");
+
+// -- privacy / trackers -----------------------------------------------------
+
+export const getPrivacySettings = () => invoke<PrivacySettings>("get_privacy_settings");
+export const setPrivacySettings = (input: PrivacySettings) =>
+  invoke<PrivacySettings>("set_privacy_settings", { input });
+/** What one message wanted to load from somebody else's server. */
+export const messageTrackers = (id: string) =>
+  invoke<TrackerHit[]>("message_trackers", { id });
+/** The heatmap, the worst offenders, and the totals behind them. */
+export const trackerStats = () => invoke<TrackerStats>("tracker_stats");
 
 export const indexStatus = () => invoke<IndexStatus>("index_status");
 /**

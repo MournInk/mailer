@@ -9,6 +9,7 @@
 //! - [`mcp`]     MCP *client*: tools borrowed from external servers
 //! - [`memory`]  what the assistant knows about the user, and how it is revised
 //! - [`notify`]  external notification channels (Telegram / QQ bot / webhook / Bark)
+//! - [`trackers`] finding the tracking pixels in a mail, without loading one
 //! - [`sync`]    orchestration: fetch → parse → store → classify → act
 
 pub mod ai;
@@ -23,6 +24,7 @@ pub mod rag;
 pub mod store;
 pub mod sync;
 pub mod tools;
+pub mod trackers;
 pub mod types;
 
 pub use error::{Error, Result};

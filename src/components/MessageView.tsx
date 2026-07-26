@@ -12,11 +12,17 @@
  *    confirmation dialog nobody reads.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import * as api from "../lib/api";
 import { formatFullDate, useApp } from "../lib/store";
-import { CATEGORY_LABEL, type AttachmentMeta, type EmailMessage } from "../lib/types";
+import {
+  CATEGORY_LABEL,
+  TRACKER_KIND_LABEL,
+  type AttachmentMeta,
+  type EmailMessage,
+  type TrackerHit,
+} from "../lib/types";
 import { Icon } from "./Icon";
 import "./MessageView.css";
 
@@ -113,6 +119,17 @@ function sanitizeBody(dirty: string, allowRemote: boolean): CleanBody {
   }
 }
 
+/**
+ * Requests that were actually tracking, as opposed to merely remote.
+ *
+ * A newsletter's forty product photos are forty blocked requests and zero
+ * trackers; one 1×1 gif from an ESP is one blocked request and one tracker. The
+ * headline number has to be the second kind or it means nothing.
+ */
+function trackerCount(hits: TrackerHit[]): number {
+  return hits.filter((h) => h.kind !== "remote").reduce((n, h) => n + h.count, 0);
+}
+
 /** Bytes → short human string (attachment rows are metadata, keep them terse). */
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -162,12 +179,35 @@ export function MessageView() {
 }
 
 function MessageDetail({ msg }: { msg: EmailMessage }) {
-  const { select, toggleStar, remove, openCompose, pushToast } = useApp();
+  const { select, toggleStar, remove, openCompose, pushToast, blockTrackers } = useApp();
 
-  const [showImages, setShowImages] = useState(false);
+  // With blocking off, remote content loads with the message. The state is keyed
+  // on the setting so flipping the switch takes effect on the open mail rather
+  // than on the next one.
+  const [showImages, setShowImages] = useState(!blockTrackers);
+  useEffect(() => setShowImages(!blockTrackers), [blockTrackers, msg.id]);
   const [showRecipients, setShowRecipients] = useState(false);
   const [showReason, setShowReason] = useState(false);
+  const [showTrackers, setShowTrackers] = useState(false);
   const [reclassifying, setReclassifying] = useState(false);
+
+  // What this message wanted to load, scanned when it arrived. Read-only, and
+  // absent for text-only mail — a failure here costs the report, nothing else.
+  const [trackers, setTrackers] = useState<TrackerHit[]>([]);
+  useEffect(() => {
+    let live = true;
+    setTrackers([]);
+    setShowTrackers(false);
+    void api
+      .messageTrackers(msg.id)
+      .then((t) => {
+        if (live) setTrackers(t);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [msg.id]);
 
   const subject = msg.subject || "(无主题)";
   const analysis = msg.analysis;
@@ -391,26 +431,66 @@ function MessageDetail({ msg }: { msg: EmailMessage }) {
             </section>
           )}
 
-          {/* -- remote image gate ------------------------------------------- */}
+          {/* -- what this mail wanted to load -------------------------------
+              Under the AI panel, because it is the same kind of thing: something
+              the app worked out about this message that the message itself does
+              not say. The count comes from the sanitizer (what was actually
+              neutralised, live); the names come from the scan done when the mail
+              arrived, which knows which hosts and why. */}
           {body && body.blocked > 0 && !showImages && (
             <div className="card mv-imgbar">
-              <span className="mv-imgbar-chip" aria-hidden="true">
-                <Icon name="shield" size={16} />
-              </span>
-              <span className="mv-imgbar-text">
-                <span className="mv-imgbar-title">
-                  已阻止 {body.blocked} 处远程图片
+              <div className="mv-imgbar-row">
+                <span className="mv-imgbar-chip" aria-hidden="true">
+                  <Icon name="shield" size={16} />
                 </span>
-                <span className="mv-imgbar-hint">
-                  载入远程图片会让发件人知道你读过这封邮件。
+                <span className="mv-imgbar-text">
+                  <span className="mv-imgbar-title">
+                    {trackerCount(trackers) > 0
+                      ? `已拦截 ${trackerCount(trackers)} 个追踪器，共阻止 ${body.blocked} 处远程内容`
+                      : `已阻止 ${body.blocked} 处远程内容`}
+                  </span>
+                  <span className="mv-imgbar-hint">
+                    载入远程内容会让发件人知道你读过这封邮件，以及什么时候读的。
+                  </span>
                 </span>
-              </span>
-              <button
-                className="btn btn-sm mv-imgbar-btn"
-                onClick={() => setShowImages(true)}
-              >
-                显示图片
-              </button>
+                <button
+                  className="btn btn-sm mv-imgbar-btn"
+                  onClick={() => setShowImages(true)}
+                >
+                  显示图片
+                </button>
+              </div>
+
+              {trackers.length > 0 && (
+                <>
+                  <button
+                    className="mv-disclosure mv-track-toggle"
+                    onClick={() => setShowTrackers((v) => !v)}
+                    aria-expanded={showTrackers}
+                  >
+                    <Icon
+                      name={showTrackers ? "chevron-down" : "chevron-right"}
+                      size={13}
+                    />
+                    拦截了哪些
+                  </button>
+                  {showTrackers && (
+                    <ul className="mv-track-list">
+                      {trackers.map((t) => (
+                        <li key={`${t.host}-${t.kind}`} className="mv-track">
+                          <span className={`mv-track-tag mv-track-${t.kind}`}>
+                            {TRACKER_KIND_LABEL[t.kind]}
+                          </span>
+                          <span className="mv-track-host">{t.host}</span>
+                          {t.count > 1 && (
+                            <span className="mv-track-count">×{t.count}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
             </div>
           )}
 

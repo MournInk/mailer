@@ -31,6 +31,7 @@ export type SettingsTab =
   | "ai"
   | "knowledge"
   | "tools"
+  | "privacy"
   | "channels"
   | "about";
 
@@ -82,6 +83,8 @@ interface AppStore {
   view: View;
   settingsTab: SettingsTab;
   theme: ThemePref;
+  /** Refuse remote content in mail until asked, per message. Default on. */
+  blockTrackers: boolean;
   alerts: AlertEvent[];
   toasts: Toast[];
   compose: ComposeState | null;
@@ -110,6 +113,7 @@ interface AppStore {
   openSettings: (tab?: SettingsTab) => void;
   closeSettings: () => void;
   setTheme: (t: ThemePref) => void;
+  setBlockTrackers: (v: boolean) => Promise<void>;
   pushToast: (kind: Toast["kind"], text: string) => void;
   dismissToast: (id: number) => void;
   dismissAlert: (messageId: string) => void;
@@ -153,6 +157,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<ThemePref>(
     () => (localStorage.getItem("mailer.theme") as ThemePref) || "system",
   );
+  // The tracker switch lives here rather than in the settings screen: the
+  // reading pane has to honour it the moment it changes, and both need one
+  // answer to "are we blocking".
+  const [blockTrackers, setBlockTrackersState] = useState(true);
   const [alerts, setAlerts] = useState<AlertEvent[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [compose, setCompose] = useState<ComposeState | null>(null);
@@ -166,6 +174,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   pageRef.current = page;
 
   // -- theme ----------------------------------------------------------------
+  // Read the stored preference once. Blocking stays on until told otherwise,
+  // which is also what happens if this read fails.
+  useEffect(() => {
+    void api
+      .getPrivacySettings()
+      .then((p) => setBlockTrackersState(p.blockTrackers))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     applyTheme(theme);
     localStorage.setItem("mailer.theme", theme);
@@ -382,6 +399,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setTheme = useCallback((t: ThemePref) => setThemeState(t), []);
 
+  const setBlockTrackers = useCallback(async (v: boolean) => {
+    // Optimistic: the pane should stop blocking the instant the switch moves,
+    // and a failed write is worth a toast rather than a frozen switch.
+    setBlockTrackersState(v);
+    try {
+      await api.setPrivacySettings({ blockTrackers: v });
+    } catch (e) {
+      setBlockTrackersState(!v);
+      pushToast("error", `保存失败: ${e}`);
+    }
+  }, [pushToast]);
+
   const dismissAlert = useCallback((messageId: string) => {
     setAlerts((a) => a.filter((x) => x.messageId !== messageId));
   }, []);
@@ -491,6 +520,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       view,
       settingsTab,
       theme,
+      blockTrackers,
       alerts,
       toasts,
       compose,
@@ -506,6 +536,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       openSettings,
       closeSettings,
       setTheme,
+      setBlockTrackers,
       pushToast,
       dismissToast,
       dismissAlert,
@@ -521,7 +552,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }),
     [
       accounts, counts, syncMap, page, filter, selected, selectedId,
-      loadingList, loadingMore, view, settingsTab, theme, alerts, toasts, compose,
+      loadingList, loadingMore, view, settingsTab, theme, blockTrackers, alerts, toasts, compose,
       refreshAccounts, refreshList, loadMore, setFilter, select, toggleStar,
       markReadAction, remove, sync, openSettings, closeSettings, setTheme,
       pushToast, dismissToast, dismissAlert, openAlertMessage, openCompose, closeCompose,

@@ -674,6 +674,95 @@ pub struct IndexStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Trackers
+// ---------------------------------------------------------------------------
+
+/// Why one remote reference in a mail is worth naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackerKind {
+    /// A host whose business is knowing you opened the mail.
+    Known,
+    /// An image nobody is meant to see: 1×1, zero-sized, or hidden.
+    Pixel,
+    /// An ordinary remote resource. Still a request that reports the open, which
+    /// is why it is blocked — but there is no evidence it was put there to.
+    Remote,
+}
+
+impl TrackerKind {
+    /// True for the two kinds that are actually tracking, as opposed to merely
+    /// remote. What the counts and the heatmap are about.
+    pub fn is_tracker(self) -> bool {
+        matches!(self, TrackerKind::Known | TrackerKind::Pixel)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrackerKind::Known => "known",
+            TrackerKind::Pixel => "pixel",
+            TrackerKind::Remote => "remote",
+        }
+    }
+
+    pub fn parse(s: &str) -> TrackerKind {
+        match s {
+            "known" => TrackerKind::Known,
+            "pixel" => TrackerKind::Pixel,
+            _ => TrackerKind::Remote,
+        }
+    }
+}
+
+/// One host a message wanted to reach, and how many times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerHit {
+    pub host: String,
+    pub kind: TrackerKind,
+    pub count: u32,
+}
+
+/// One day of the heatmap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerDay {
+    /// `YYYY-MM-DD`, local time — the day the user would call it.
+    pub day: String,
+    /// Requests blocked that day, counting only the tracking kinds.
+    pub blocked: u32,
+    /// Messages that carried at least one.
+    pub messages: u32,
+}
+
+/// The privacy summary the settings screen shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerStats {
+    pub days: Vec<TrackerDay>,
+    /// The worst offenders over the same window, most requests first.
+    pub top: Vec<TrackerHit>,
+    /// Totals over the window.
+    pub blocked: u32,
+    pub messages: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PrivacySettings {
+    /// Refuse remote content in mail until the user asks for it, per message.
+    /// On by default: a mail client that phones home for every message it shows
+    /// is the behaviour being fixed, not a preference.
+    pub block_trackers: bool,
+}
+
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        PrivacySettings { block_trackers: true }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MCP (outbound: servers this app connects to as a client)
 // ---------------------------------------------------------------------------
 

@@ -21,6 +21,8 @@ export type McpTransport = "http" | "stdio";
 /** How the key reaches an HTTP MCP server. There is no standard. */
 export type McpAuth = "none" | "bearer" | "api-key-header";
 export type ChatRole = "user" | "assistant" | "tool";
+/** Why one remote reference in a mail is worth naming. */
+export type TrackerKind = "known" | "pixel" | "remote";
 
 export interface AccountPublic {
   id: string;
@@ -247,6 +249,34 @@ export interface McpServerStatus {
   error: string | null;
 }
 
+/** One host a message wanted to reach, and how many times. */
+export interface TrackerHit {
+  host: string;
+  kind: TrackerKind;
+  count: number;
+}
+
+export interface TrackerDay {
+  /** `YYYY-MM-DD`, local time. */
+  day: string;
+  /** requests blocked that day, tracking kinds only */
+  blocked: number;
+  /** messages that carried at least one */
+  messages: number;
+}
+
+export interface TrackerStats {
+  days: TrackerDay[];
+  top: TrackerHit[];
+  blocked: number;
+  messages: number;
+}
+
+export interface PrivacySettings {
+  /** refuse remote content until asked, per message. Default true. */
+  blockTrackers: boolean;
+}
+
 export interface NotifyChannel {
   id: string;
   name: string;
@@ -453,6 +483,12 @@ export const MCP_AUTH_LABEL: Record<McpAuth, string> = {
   none: "无需鉴权",
   bearer: "Authorization: Bearer",
   "api-key-header": "x-api-key 请求头",
+};
+
+export const TRACKER_KIND_LABEL: Record<TrackerKind, string> = {
+  known: "追踪服务",
+  pixel: "追踪像素",
+  remote: "远程资源",
 };
 
 export const MEMORY_OP_LABEL: Record<string, string> = {

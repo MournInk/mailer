@@ -44,6 +44,20 @@ async fn with_timeout<T>(
     }
 }
 
+/// `YYYY-MM-DD` in the user's own timezone.
+///
+/// Local, not UTC: the heatmap is a row of days as the user experienced them, and
+/// a mail that arrived at 08:00 in Shanghai belongs to that morning, not to the
+/// previous evening.
+pub fn local_day(ms: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -245,6 +259,10 @@ impl SyncEngine {
                 Ok(msg) => {
                     if self.store.insert_message(&msg)? {
                         inserted += 1;
+                        // What this mail wanted to load, recorded now so the
+                        // privacy figures cover everything that arrived rather
+                        // than only what somebody opened.
+                        self.scan_trackers(&msg);
                     }
                 }
                 Err(e) => {
@@ -277,6 +295,27 @@ impl SyncEngine {
         }
 
         Ok(inserted)
+    }
+
+    /// Record what one message wanted to load from elsewhere.
+    ///
+    /// Best-effort and non-fatal: the scan is a report about the mail, and a
+    /// mailbox that refused to accept mail because a report failed would be a
+    /// worse trade than a missing report. Text-only mail is marked scanned
+    /// without looking, because there is nothing in it to find.
+    pub fn scan_trackers(&self, msg: &EmailMessage) {
+        let hits = match msg.body_html.as_deref().filter(|h| !h.is_empty()) {
+            Some(html) => crate::trackers::scan(html),
+            None => Vec::new(),
+        };
+        let day = local_day(msg.date);
+        let outcome = self
+            .store
+            .put_trackers(&msg.id, &day, &hits)
+            .and_then(|()| self.store.mark_scanned(&msg.id));
+        if let Err(e) = outcome {
+            tracing::warn!("tracker scan not recorded for {}: {e}", msg.id);
+        }
     }
 
     /// Run the AI triage over stored-but-unclassified messages.

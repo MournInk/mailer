@@ -17,6 +17,7 @@ import { AiTab } from "./AiTab";
 import { KnowledgeTab } from "./KnowledgeTab";
 import { ChannelsTab } from "./ChannelsTab";
 import { ToolsTab } from "./ToolsTab";
+import { PrivacyTab } from "./PrivacyTab";
 import "./Settings.css";
 
 const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }> = [
@@ -43,6 +44,12 @@ const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }
     label: "外部工具",
     icon: "plug",
     sub: "接入 MCP 服务器，让助手能查邮件之外的东西",
+  },
+  {
+    key: "privacy",
+    label: "隐私",
+    icon: "shield",
+    sub: "拦截邮件里的追踪器，并看看它们有多频繁",
   },
   {
     key: "channels",
@@ -123,6 +130,7 @@ export function SettingsView() {
             {settingsTab === "ai" && <AiTab />}
             {settingsTab === "knowledge" && <KnowledgeTab />}
             {settingsTab === "tools" && <ToolsTab />}
+            {settingsTab === "privacy" && <PrivacyTab />}
             {settingsTab === "channels" && <ChannelsTab />}
             {settingsTab === "about" && <AboutTab />}
           </div>

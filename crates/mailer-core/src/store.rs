@@ -179,6 +179,30 @@ CREATE TABLE IF NOT EXISTS memory_events (
 CREATE INDEX IF NOT EXISTS idx_memory_events_mem
     ON memory_events(memory_id, created_at DESC);
 
+-- What each message tried to load from somebody else's server.
+--
+-- Written when the mail arrives, whether or not it is ever opened: "how much of
+-- my mail is tracking me" is a question about everything that came in, not about
+-- what happened to be read.
+CREATE TABLE IF NOT EXISTS message_trackers (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    host       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    count      INTEGER NOT NULL,
+    -- The message's own date, so the heatmap is about when mail arrived rather
+    -- than when this table was written.
+    day        TEXT NOT NULL,
+    PRIMARY KEY (message_id, host, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trackers_day ON message_trackers(day);
+
+-- A message with nothing to report has no rows above, which is
+-- indistinguishable from one that was never looked at. This is the difference.
+CREATE TABLE IF NOT EXISTS tracker_scans (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE
+);
+
 -- Full-text index over the whole of every message.
 --
 -- The list search used to be `LIKE` over subject, sender and the 140-character
@@ -429,6 +453,118 @@ impl Store {
                 index_text(c, m)?;
             }
             Ok(n > 0)
+        })
+    }
+
+    // -- trackers -----------------------------------------------------------
+
+    /// Record what one message wanted to load, replacing any earlier scan.
+    ///
+    /// `day` comes from the message's own date rather than from now: a mailbox
+    /// synced for the first time would otherwise pile a year of newsletters onto
+    /// today and make the heatmap a lie.
+    pub fn put_trackers(&self, message_id: &str, day: &str, hits: &[TrackerHit]) -> Result<()> {
+        self.with_tx(|tx| {
+            tx.execute("DELETE FROM message_trackers WHERE message_id=?1", params![message_id])?;
+            let mut stmt = tx.prepare(
+                "INSERT INTO message_trackers (message_id, host, kind, count, day)
+                 VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for hit in hits {
+                stmt.execute(params![message_id, hit.host, hit.kind.as_str(), hit.count, day])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// What one message wanted to load, worst kind first.
+    pub fn trackers_for(&self, message_id: &str) -> Result<Vec<TrackerHit>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT host, kind, count FROM message_trackers
+                  WHERE message_id=?1
+                  ORDER BY CASE kind WHEN 'known' THEN 0 WHEN 'pixel' THEN 1 ELSE 2 END,
+                           count DESC, host ASC",
+            )?;
+            let rows = stmt.query_map(params![message_id], |r| {
+                let kind: String = r.get(1)?;
+                Ok(TrackerHit {
+                    host: r.get(0)?,
+                    kind: TrackerKind::parse(&kind),
+                    count: r.get::<_, i64>(2)?.max(0) as u32,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Per-day counts from `since` (a `YYYY-MM-DD` string) onwards, counting only
+    /// the kinds that are actually tracking. Days with nothing are absent; the
+    /// caller fills the calendar, because only it knows which days it is drawing.
+    pub fn tracker_days(&self, since: &str) -> Result<Vec<TrackerDay>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT day, SUM(count), COUNT(DISTINCT message_id)
+                   FROM message_trackers
+                  WHERE day >= ?1 AND kind IN ('known','pixel')
+                  GROUP BY day ORDER BY day ASC",
+            )?;
+            let rows = stmt.query_map(params![since], |r| {
+                Ok(TrackerDay {
+                    day: r.get(0)?,
+                    blocked: r.get::<_, i64>(1)?.max(0) as u32,
+                    messages: r.get::<_, i64>(2)?.max(0) as u32,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// The hosts asking most often since `since`, most requests first.
+    pub fn tracker_top(&self, since: &str, limit: u32) -> Result<Vec<TrackerHit>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT host, MIN(kind), SUM(count) FROM message_trackers
+                  WHERE day >= ?1 AND kind IN ('known','pixel')
+                  GROUP BY host ORDER BY SUM(count) DESC, host ASC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![since, limit as i64], |r| {
+                let kind: String = r.get(1)?;
+                Ok(TrackerHit {
+                    host: r.get(0)?,
+                    kind: TrackerKind::parse(&kind),
+                    count: r.get::<_, i64>(2)?.max(0) as u32,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Messages whose trackers have never been scanned, newest first. The scan
+    /// arrived after the mailbox did.
+    pub fn messages_missing_trackers(&self, limit: u32) -> Result<Vec<EmailMessage>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT * FROM messages m
+                  WHERE m.deleted=0 AND m.body_html IS NOT NULL AND m.body_html <> ''
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tracker_scans s WHERE s.message_id = m.id)
+                  ORDER BY m.date DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit as i64], row_to_message)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Note that a message has been scanned, whether or not anything was found.
+    /// Without this, a clean message would be rescanned on every startup.
+    pub fn mark_scanned(&self, message_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO tracker_scans (message_id) VALUES (?1)",
+                params![message_id],
+            )?;
+            Ok(())
         })
     }
 
@@ -1537,6 +1673,17 @@ impl Store {
 
     pub fn set_reranker_settings(&self, s: &RerankerSettings) -> Result<()> {
         self.set_setting("reranker", &serde_json::to_string(s)?)
+    }
+
+    pub fn privacy_settings(&self) -> Result<PrivacySettings> {
+        match self.get_setting("privacy")? {
+            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            None => Ok(PrivacySettings::default()),
+        }
+    }
+
+    pub fn set_privacy_settings(&self, s: &PrivacySettings) -> Result<()> {
+        self.set_setting("privacy", &serde_json::to_string(s)?)
     }
 
     /// The external MCP servers, in the order the user added them.

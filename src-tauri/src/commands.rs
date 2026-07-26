@@ -570,6 +570,107 @@ pub fn set_reranker_settings(
 }
 
 // ---------------------------------------------------------------------------
+// Trackers
+// ---------------------------------------------------------------------------
+
+/// Days the privacy screen draws. Ten weeks is enough for a pattern to be visible
+/// and short enough to fit a settings card without scrolling sideways.
+const TRACKER_DAYS: i64 = 70;
+/// Hosts named in the "worst offenders" list.
+const TRACKER_TOP: u32 = 8;
+/// Messages scanned per pass during the backfill.
+const TRACKER_BATCH: u32 = 200;
+
+#[tauri::command]
+pub fn get_privacy_settings(state: State<'_, AppState>) -> CmdResult<PrivacySettings> {
+    state.engine.store().privacy_settings().map_err(err_str)
+}
+
+#[tauri::command]
+pub fn set_privacy_settings(
+    state: State<'_, AppState>,
+    input: PrivacySettings,
+) -> CmdResult<PrivacySettings> {
+    let store = state.engine.store();
+    store.set_privacy_settings(&input).map_err(err_str)?;
+    Ok(input)
+}
+
+/// What one message wanted to load from somebody else's server.
+#[tauri::command]
+pub fn message_trackers(state: State<'_, AppState>, id: String) -> CmdResult<Vec<TrackerHit>> {
+    state.engine.store().trackers_for(&id).map_err(err_str)
+}
+
+/// The heatmap, the worst offenders, and the totals behind them.
+///
+/// Every day in the window is present whether or not anything happened on it: a
+/// calendar with holes in it is not a calendar, and the store only returns the
+/// days it has rows for.
+#[tauri::command]
+pub fn tracker_stats(state: State<'_, AppState>) -> CmdResult<TrackerStats> {
+    let store = state.engine.store();
+    let today = now_ms();
+    let day_ms = 86_400_000i64;
+    let since = mailer_core::sync::local_day(today - (TRACKER_DAYS - 1) * day_ms);
+
+    let found = store.tracker_days(&since).map_err(err_str)?;
+    let by_day: std::collections::HashMap<String, &TrackerDay> =
+        found.iter().map(|d| (d.day.clone(), d)).collect();
+
+    let mut days = Vec::with_capacity(TRACKER_DAYS as usize);
+    for back in (0..TRACKER_DAYS).rev() {
+        let day = mailer_core::sync::local_day(today - back * day_ms);
+        days.push(match by_day.get(&day) {
+            Some(d) => (*d).clone(),
+            None => TrackerDay { day, blocked: 0, messages: 0 },
+        });
+    }
+
+    Ok(TrackerStats {
+        blocked: days.iter().map(|d| d.blocked).sum(),
+        messages: days.iter().map(|d| d.messages).sum(),
+        top: store.tracker_top(&since, TRACKER_TOP).map_err(err_str)?,
+        days,
+    })
+}
+
+/// Scan mail that arrived before the scanner did.
+///
+/// Same shape as the text-index backfill: local, bounded, yielding, and measured
+/// rather than assumed so a message that cannot be scanned cannot loop.
+pub async fn backfill_trackers(engine: std::sync::Arc<SyncEngine>) {
+    let store = engine.store();
+    loop {
+        let batch = match store.messages_missing_trackers(TRACKER_BATCH) {
+            Ok(batch) => batch,
+            Err(e) => {
+                tracing::warn!("tracker scan: 读取待扫描邮件失败: {e}");
+                return;
+            }
+        };
+        if batch.is_empty() {
+            return;
+        }
+        tracing::info!("tracker scan: 正在扫描 {} 封旧邮件", batch.len());
+        for msg in &batch {
+            engine.scan_trackers(msg);
+        }
+        // `scan_trackers` swallows its own failures, so progress is checked here:
+        // a batch that comes back unchanged would otherwise repeat forever.
+        match store.messages_missing_trackers(1) {
+            Ok(next) if next.first().map(|m| m.id.as_str()) == batch.first().map(|m| m.id.as_str()) => {
+                tracing::warn!("tracker scan: 无法扫描 {}，已停止", batch[0].id);
+                return;
+            }
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Full-text index
 // ---------------------------------------------------------------------------
 

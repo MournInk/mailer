@@ -92,6 +92,9 @@ pub fn run() {
             // Purely local work — no endpoint, no key, no cost — so it runs
             // itself rather than waiting to be asked.
             tauri::async_runtime::spawn(commands::backfill_text_index(engine.clone()));
+            // Same deal for the tracker report: local, and about mail that
+            // arrived before there was anything looking.
+            tauri::async_runtime::spawn(commands::backfill_trackers(engine.clone()));
             app.manage(AppState {
                 engine,
                 index: Arc::default(),
@@ -127,6 +130,10 @@ pub fn run() {
             commands::test_embedding,
             commands::get_reranker_settings,
             commands::set_reranker_settings,
+            commands::get_privacy_settings,
+            commands::set_privacy_settings,
+            commands::message_trackers,
+            commands::tracker_stats,
             commands::get_mcp_servers,
             commands::save_mcp_server,
             commands::delete_mcp_server,
