@@ -39,7 +39,7 @@ const WATCH_BACKOFF_MIN: Duration = Duration::from_secs(5);
 const WATCH_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
 /// Room on top of `IDLE_WINDOW` for the connect, login and teardown around it.
 const WATCH_SLACK: Duration = Duration::from_secs(60);
-/// How long the whole external-channel phase may hold up the local alert.
+/// How long any one external channel may hold up the local alert.
 ///
 /// The desktop notification is suppressed only when a channel actually took
 /// delivery, which means the answer has to be known before the popup — but an
@@ -47,6 +47,11 @@ const WATCH_SLACK: Duration = Duration::from_secs(60);
 /// the local notification would then be late in precisely the case where it is
 /// the only one left. Past this budget the alert goes out as unrouted: a
 /// duplicate is a far smaller failure than silence.
+///
+/// Per channel, and the channels run concurrently, so this is the wait for the
+/// whole phase however many are configured. Bounding the phase around a serial
+/// loop instead would let one dead webhook cancel the loop before Telegram or
+/// Bark were tried at all.
 const NOTIFY_BUDGET: Duration = Duration::from_secs(5);
 
 /// Whether an account can be watched live.
@@ -639,9 +644,9 @@ impl SyncEngine {
         // mean a mail nobody hears about at all whenever Telegram is down —
         // the one case where the local notification matters most.
         //
-        // Bounded as a whole: see `NOTIFY_BUDGET`. Delivery that has not landed
-        // by then is still in flight and may well succeed, but the popup stops
-        // waiting for it.
+        // Concurrently, each with its own bounded attempt: see `NOTIFY_BUDGET`.
+        // One channel that hangs must not stop another from being tried, and
+        // must not hold the popup for longer than its own budget.
         let wanted: Vec<&NotifyChannel> = channels
             .iter()
             .filter(|ch| ch.enabled && ch.notify_categories.contains(&analysis.category))
@@ -649,23 +654,26 @@ impl SyncEngine {
         let mut routed = false;
         if !wanted.is_empty() {
             let http = &self.http;
-            let deliver = async {
-                let mut any = false;
-                for ch in wanted {
-                    match notify::dispatch(http, ch, &payload).await {
-                        Ok(()) => any = true,
-                        Err(e) => tracing::warn!("channel {} dispatch failed: {e}", ch.name),
+            let payload = &payload;
+            let attempts = wanted.into_iter().map(|ch| async move {
+                match tokio::time::timeout(NOTIFY_BUDGET, notify::dispatch(http, ch, payload)).await
+                {
+                    Ok(Ok(())) => true,
+                    Ok(Err(e)) => {
+                        tracing::warn!("channel {} dispatch failed: {e}", ch.name);
+                        false
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "channel {} 未在 {} 秒内完成，本机通知照常发出",
+                            ch.name,
+                            NOTIFY_BUDGET.as_secs()
+                        );
+                        false
                     }
                 }
-                any
-            };
-            match tokio::time::timeout(NOTIFY_BUDGET, deliver).await {
-                Ok(any) => routed = any,
-                Err(_) => tracing::warn!(
-                    "外部通知渠道 {} 秒内未完成，本机通知照常发出",
-                    NOTIFY_BUDGET.as_secs()
-                ),
-            }
+            });
+            routed = futures::future::join_all(attempts).await.into_iter().any(|ok| ok);
         }
 
         match analysis.category {
