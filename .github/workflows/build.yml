@@ -6,6 +6,9 @@ name: Build
 on:
   push:
     tags: ["v*"]
+    # Development branches build too, so installers are downloadable from the
+    # run without waiting for a release tag. Only tagged runs draft a release.
+    branches: ["main", "claude/**"]
   workflow_dispatch:
 
 permissions:
