@@ -850,13 +850,21 @@ fn strip_html(html: &str) -> String {
 }
 
 fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
     s.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
+        .replace("&#160;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
         .replace("&#39;", "'")
         .replace("&apos;", "'")
+        // Last, so that "&amp;lt;" does not turn into "<". Decoding the
+        // ampersand first would hand the model a tag the sender only wrote
+        // about, which is how an escaped example becomes live markup.
+        .replace("&amp;", "&")
 }
 
 #[cfg(test)]
@@ -1128,5 +1136,14 @@ mod tests {
         assert!(text.contains("账单 & 收据"));
         assert!(!text.contains("color:red"));
         assert!(!text.contains("x()"));
+    }
+
+    /// An entity is decoded once. Taking the ampersand first turns the escaped
+    /// "&amp;lt;b&amp;gt;" a sender wrote *about* into live-looking markup.
+    #[test]
+    fn entities_are_not_decoded_twice() {
+        assert_eq!(decode_entities("&amp;lt;b&amp;gt;"), "&lt;b&gt;");
+        assert_eq!(decode_entities("&lt;b&gt; &amp; &quot;x&quot;"), "<b> & \"x\"");
+        assert_eq!(decode_entities("no entities here"), "no entities here");
     }
 }

@@ -68,6 +68,24 @@ export function ShortcutListener() {
     let pendingG = false;
     let gTimer: number | undefined;
 
+    /**
+     * Move the selection `delta` rows through the loaded list. With nothing
+     * selected, "next" means the first row and "previous" the last, so a single
+     * keystroke gets you into the list from either end.
+     */
+    const step = (delta: number) => {
+      const items = app.page.items;
+      if (items.length === 0) return;
+      const at = app.selectedId ? items.findIndex((m) => m.id === app.selectedId) : -1;
+      const next =
+        at < 0
+          ? delta > 0
+            ? 0
+            : items.length - 1
+          : Math.min(items.length - 1, Math.max(0, at + delta));
+      if (next !== at) void app.select(items[next].id);
+    };
+
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
 
@@ -120,6 +138,20 @@ export function ShortcutListener() {
         case "?":
           e.preventDefault();
           app.setShortcutsOpen(true);
+          break;
+        // The list's own ArrowUp/ArrowDown only reach it while it has focus, so
+        // j/k were documented on the cheat sheet and did nothing everywhere
+        // else. They step the selection instead of a cursor: from anywhere in
+        // the app, the next letter opens the next mail.
+        case "j":
+        case "J":
+          e.preventDefault();
+          step(1);
+          break;
+        case "k":
+        case "K":
+          e.preventDefault();
+          step(-1);
           break;
         case "g":
         case "G":

@@ -56,7 +56,11 @@ export function MessageList() {
   // arrow-key navigation does not move the range origin.
   const [picked, setPicked] = useState<Set<string>>(() => new Set());
   const [anchor, setAnchor] = useState<string | null>(null);
-  const { state: menu, close: closeMenu, openAt } = useContextMenu();
+  // Row menus only. The clipboard fallback is mounted once at the app shell, so
+  // it covers the settings and onboarding screens too.
+  const { state: menu, close: closeMenu, openAt } = useContextMenu({
+    clipboardFallback: false,
+  });
 
   const items = page.items;
 

@@ -1,6 +1,6 @@
 //! TCP + rustls connection helper shared by the IMAP and POP3 clients.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -64,14 +64,24 @@ impl AsyncWrite for MaybeTlsStream {
     }
 }
 
+/// The shared client configuration.
+///
+/// Building it copies every root in the webpki bundle into a fresh store and
+/// then has rustls re-derive its cipher-suite and key-exchange tables. That is
+/// the same work every time and none of it depends on the peer, so doing it per
+/// connection made every sync, STARTTLS upgrade and server-side delete pay for
+/// a certificate store nobody had asked to change. One `Arc` clone instead.
 fn tls_config() -> Arc<ClientConfig> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    Arc::clone(CONFIG.get_or_init(|| {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }))
 }
 
 /// Open a TCP connection to `host:port`.
@@ -98,4 +108,31 @@ pub async fn tls_wrap(host: &str, stream: TcpStream) -> Result<TlsStream<TcpStre
 pub async fn connect_tls(host: &str, port: u16) -> Result<TlsStream<TcpStream>> {
     let tcp = tcp_connect(host, port).await?;
     tls_wrap(host, tcp).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every connection must share one configuration. Rebuilding it per
+    /// connection is invisible in behaviour and expensive in aggregate, so the
+    /// sharing is what the test pins down.
+    #[test]
+    fn the_tls_config_is_built_once_and_shared() {
+        assert!(Arc::ptr_eq(&tls_config(), &tls_config()));
+    }
+
+    /// A host that is not a valid server name must be named, not turned into an
+    /// opaque handshake failure later.
+    #[tokio::test]
+    async fn an_invalid_server_name_is_refused_before_the_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.map(|_| ()) });
+
+        let tcp = tcp_connect("127.0.0.1", addr.port()).await.unwrap();
+        let err = tls_wrap("not a hostname", tcp).await.unwrap_err();
+        assert!(matches!(err, Error::Tls(_)), "got {err:?}");
+        let _ = accept.await;
+    }
 }
