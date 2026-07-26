@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use mailer_core::mail::{imap, pop3, smtp};
 use mailer_core::sync::{now_ms, SyncEngine};
 use mailer_core::types::*;
-use mailer_core::{ai, assistant, mcp, notify, rag};
+use mailer_core::{ai, assistant, mcp, memory, notify, rag};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -869,27 +869,22 @@ pub struct MemoryInput {
     pub source: Option<String>,
 }
 
-fn memory_from(
-    input: MemoryInput,
-    existing: Option<&MemoryEntry>,
-    now: i64,
-) -> CmdResult<MemoryEntry> {
-    let text = input.text.trim().to_string();
-    if text.is_empty() {
-        return Err("记忆内容不能为空".to_string());
-    }
-    Ok(MemoryEntry {
-        id: input
-            .id
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(new_id),
+/// History rows shown on the knowledge screen.
+const MEMORY_HISTORY: u32 = 50;
+/// Audit-trail rows shown for one memory.
+const MEMORY_EVENTS: u32 = 20;
+
+fn memory_from(input: MemoryInput, existing: Option<&MemoryEntry>, now: i64) -> MemoryEntry {
+    MemoryEntry {
+        id: input.id.filter(|id| !id.is_empty()).unwrap_or_else(new_id),
         kind: input.kind,
-        text,
+        text: input.text,
         source: input.source.filter(|s| !s.trim().is_empty()),
         // Editing a memory does not make it new; only `updated_at` moves.
         created_at: existing.map(|m| m.created_at).unwrap_or(now),
         updated_at: now,
-    })
+        ..Default::default()
+    }
 }
 
 #[tauri::command]
@@ -897,18 +892,52 @@ pub fn list_memories(state: State<'_, AppState>) -> CmdResult<Vec<MemoryEntry>> 
     state.engine.store().list_memories().map_err(err_str)
 }
 
+/// Memories that stopped being true, newest first. Nothing here reaches a
+/// prompt; it is the record of what the assistant used to believe.
 #[tauri::command]
-pub fn save_memory(state: State<'_, AppState>, input: MemoryInput) -> CmdResult<MemoryEntry> {
-    let store = state.engine.store();
+pub fn list_memory_history(state: State<'_, AppState>) -> CmdResult<Vec<MemoryEntry>> {
+    state.engine.store().superseded_memories(MEMORY_HISTORY).map_err(err_str)
+}
+
+/// What happened to one memory, or to the memory as a whole when `id` is absent.
+#[tauri::command]
+pub fn memory_events(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> CmdResult<Vec<MemoryEvent>> {
+    state
+        .engine
+        .store()
+        .memory_events(id.as_deref(), MEMORY_EVENTS)
+        .map_err(err_str)
+}
+
+/// Add or edit a memory by hand.
+///
+/// Goes through `memory::write_by_hand`, which marks it as the user's own and
+/// therefore off-limits to the reconciler: a model rewriting a line a person
+/// typed would be the worst behaviour this feature could have.
+#[tauri::command]
+pub async fn save_memory(
+    state: State<'_, AppState>,
+    input: MemoryInput,
+) -> CmdResult<MemoryEntry> {
+    if input.text.trim().is_empty() {
+        return Err("记忆内容不能为空".to_string());
+    }
+    let engine = state.engine.clone();
+    let store = engine.store();
     // One indexed lookup: reading the whole table to find a single row got
     // slower with every memory the assistant ever stored.
     let existing = match input.id.as_deref().filter(|id| !id.is_empty()) {
         Some(id) => store.get_memory(id).map_err(err_str)?,
         None => None,
     };
-    let entry = memory_from(input, existing.as_ref(), now_ms())?;
-    store.upsert_memory(&entry).map_err(err_str)?;
-    Ok(entry)
+    let entry = memory_from(input, existing.as_ref(), now_ms());
+    let embedding = store.embedding_settings().map_err(err_str)?;
+    memory::write_by_hand(store, engine.http(), &embedding, &entry)
+        .await
+        .map_err(err_str)
 }
 
 #[tauri::command]
@@ -1267,9 +1296,8 @@ mod tests {
 
     #[test]
     fn a_new_memory_gets_an_id_and_both_timestamps() {
-        let entry = memory_from(memory_input(None, "  回信要简短  "), None, 1_700).unwrap();
+        let entry = memory_from(memory_input(None, "回信要简短"), None, 1_700);
         assert!(!entry.id.is_empty());
-        assert_eq!(entry.text, "回信要简短");
         // A whitespace-only source is no source at all.
         assert_eq!(entry.source, None);
         assert_eq!(entry.created_at, 1_700);
@@ -1282,21 +1310,15 @@ mod tests {
             id: "m1".into(),
             kind: MemoryKind::Fact,
             text: "旧内容".into(),
-            source: None,
             created_at: 1_000,
             updated_at: 1_000,
+            ..Default::default()
         };
-        let entry = memory_from(memory_input(Some("m1"), "新内容"), Some(&existing), 2_000).unwrap();
+        let entry = memory_from(memory_input(Some("m1"), "新内容"), Some(&existing), 2_000);
 
         assert_eq!(entry.id, "m1");
         assert_eq!(entry.created_at, 1_000);
         assert_eq!(entry.updated_at, 2_000);
         assert_eq!(entry.kind, MemoryKind::Preference);
-    }
-
-    #[test]
-    fn an_empty_memory_is_rejected() {
-        let err = memory_from(memory_input(None, "   \n "), None, 1).unwrap_err();
-        assert!(err.contains("不能为空"), "unexpected message: {err}");
     }
 }

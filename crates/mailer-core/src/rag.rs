@@ -690,7 +690,7 @@ fn keyword_search(store: &Store, query: &str, limit: u32) -> Result<Vec<SearchHi
 /// Cosine similarity, or `None` when the two vectors must not be compared:
 /// mismatched widths (a leftover from another embedding model) or a zero /
 /// non-finite vector, which has no direction to compare against.
-fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.is_empty() || a.len() != b.len() {
         return None;
     }

@@ -26,6 +26,7 @@ import type {
   McpServerPublic,
   McpServerStatus,
   MemoryEntry,
+  MemoryEvent,
   MemoryInput,
   MessagePage,
   MessageQuery,
@@ -139,6 +140,11 @@ export const searchMail = (query: string, limit?: number) =>
 // -- memory -----------------------------------------------------------------
 
 export const listMemories = () => invoke<MemoryEntry[]>("list_memories");
+/** Memories that stopped being true. Never injected; history only. */
+export const listMemoryHistory = () => invoke<MemoryEntry[]>("list_memory_history");
+/** What happened to one memory, or to the memory as a whole when `id` is absent. */
+export const memoryEvents = (id?: string) =>
+  invoke<MemoryEvent[]>("memory_events", { id: id ?? null });
 export const saveMemory = (input: MemoryInput) =>
   invoke<MemoryEntry>("save_memory", { input });
 export const deleteMemory = (id: string) => invoke<void>("delete_memory", { id });

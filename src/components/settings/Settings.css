@@ -1475,10 +1475,20 @@
   align-items: center;
 }
 
-.kb-mem-kind {
+/* Two classes deep on purpose. `.input, .select, .textarea { width: 100% }` in
+   base.css has the same specificity as a single class here, and base.css is
+   emitted *after* this file (main.tsx imports App — and therefore every
+   component stylesheet — before it imports the base sheet), so a bare
+   single-class rule here would lose and the kind picker would eat the whole row. */
+.kb-mem-add .select {
   width: auto;
   min-width: 96px;
   flex-shrink: 0;
+}
+
+.kb-mem-add .input {
+  flex: 1;
+  min-width: 0;
 }
 
 .kb-mem-list {
@@ -1507,4 +1517,82 @@
   font-size: var(--text-sm);
   color: var(--ink);
   overflow-wrap: anywhere;
+}
+
+/* Provenance under the sentence: who wrote it, since when, how often it has
+   mattered. Quiet, because the sentence is the thing being read. */
+.kb-mem-meta {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* A memory row grows a trail below it, so the row has to stop being one line. */
+.kb-mem:has(.kb-trail) {
+  flex-wrap: wrap;
+}
+
+.kb-trail {
+  flex-basis: 100%;
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.kb-trail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+
+.kb-trail-op {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.kb-trail-when,
+.kb-trail-empty {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--ink-3);
+}
+
+.kb-trail-text {
+  min-width: 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.kb-trail-before {
+  color: var(--ink-3);
+  margin-right: 6px;
+}
+
+.kb-trail-reason {
+  display: block;
+  color: var(--ink-3);
+}
+
+.kb-history {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.kb-mem-old {
+  width: 100%;
+  opacity: 0.75;
 }

@@ -12,6 +12,10 @@ export type SyncPhase = "idle" | "connecting" | "fetching" | "classifying" | "er
 export type AiProvider = "openai-compatible" | "openai-responses" | "anthropic" | "gemini";
 export type RerankerKind = "none" | "rerank-api" | "llm-scoring";
 export type MemoryKind = "preference" | "fact" | "contact";
+/** Whether a memory still describes the user, or is kept as history. */
+export type MemoryStatus = "active" | "superseded";
+/** Who wrote it. The reconciler never overwrites what the user typed. */
+export type MemoryOrigin = "user" | "assistant";
 /** How to reach an external MCP server. */
 export type McpTransport = "http" | "stdio";
 /** How the key reaches an HTTP MCP server. There is no standard. */
@@ -337,8 +341,31 @@ export interface MemoryEntry {
   text: string;
   /** a message id, or "assistant" when inferred */
   source: string | null;
+  status: MemoryStatus;
+  origin: MemoryOrigin;
+  /** the memory that replaced this one, when it was superseded */
+  supersededBy: string | null;
+  /** when what it says started being true, as far as we know */
+  validFrom: number | null;
+  /** when it stopped being true; null while it is still believed */
+  validTo: number | null;
+  /** answers this has been injected into — the eviction signal */
+  useCount: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** One thing that happened to one memory. */
+export interface MemoryEvent {
+  id: string;
+  memoryId: string;
+  /** add / update / supersede / noop / delete */
+  op: string;
+  beforeText: string | null;
+  afterText: string | null;
+  /** the reconciler's own short justification, when a model made the call */
+  reason: string | null;
+  createdAt: number;
 }
 
 /** Form payload for save_memory. */
@@ -426,6 +453,14 @@ export const MCP_AUTH_LABEL: Record<McpAuth, string> = {
   none: "无需鉴权",
   bearer: "Authorization: Bearer",
   "api-key-header": "x-api-key 请求头",
+};
+
+export const MEMORY_OP_LABEL: Record<string, string> = {
+  add: "新增",
+  update: "补全",
+  supersede: "替换",
+  noop: "已存在",
+  delete: "删除",
 };
 
 export const MEMORY_KIND_LABEL: Record<MemoryKind, string> = {

@@ -132,6 +132,8 @@ pub fn run() {
             commands::clear_index,
             commands::search_mail,
             commands::list_memories,
+            commands::list_memory_history,
+            commands::memory_events,
             commands::save_memory,
             commands::delete_memory,
             commands::list_conversations,

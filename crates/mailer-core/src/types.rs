@@ -830,16 +830,96 @@ pub enum MemoryKind {
     Contact,
 }
 
+/// Whether a memory still describes the user.
+///
+/// A retired memory is kept, not deleted: an email client has to be able to show
+/// why it believed something, and the user has to be able to see that a
+/// preference changed rather than finding it silently gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryStatus {
+    /// Injected into prompts and searched.
+    Active,
+    /// Replaced by something newer. History only.
+    Superseded,
+}
+
+impl Default for MemoryStatus {
+    fn default() -> Self {
+        MemoryStatus::Active
+    }
+}
+
+/// Who wrote a memory. The reconciler may retire what it wrote itself, but it
+/// may never overwrite what the user typed by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryOrigin {
+    User,
+    Assistant,
+}
+
+impl Default for MemoryOrigin {
+    fn default() -> Self {
+        MemoryOrigin::Assistant
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct MemoryEntry {
     pub id: String,
     pub kind: MemoryKind,
     pub text: String,
     /// Where it came from — a message id, or "assistant" when inferred.
     pub source: Option<String>,
+    pub status: MemoryStatus,
+    pub origin: MemoryOrigin,
+    /// The id that replaced this one, when it was superseded.
+    pub superseded_by: Option<String>,
+    /// When what this says started being true, as far as we know. Distinct from
+    /// `created_at`, which is when we came to believe it.
+    pub valid_from: Option<i64>,
+    /// When it stopped being true. `None` on an active memory.
+    pub valid_to: Option<i64>,
+    /// How many answers this has been injected into. The eviction signal.
+    pub use_count: u32,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl Default for MemoryEntry {
+    fn default() -> Self {
+        MemoryEntry {
+            id: String::new(),
+            kind: MemoryKind::Fact,
+            text: String::new(),
+            source: None,
+            status: MemoryStatus::Active,
+            origin: MemoryOrigin::Assistant,
+            superseded_by: None,
+            valid_from: None,
+            valid_to: None,
+            use_count: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+}
+
+/// One thing that happened to one memory, for the audit trail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEvent {
+    pub id: String,
+    pub memory_id: String,
+    /// `add` / `update` / `supersede` / `noop` / `delete`.
+    pub op: String,
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
+    /// The reconciler's own short justification, when a model made the call.
+    pub reason: Option<String>,
+    pub created_at: i64,
 }
 
 // ---------------------------------------------------------------------------

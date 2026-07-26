@@ -128,14 +128,56 @@ CREATE TABLE IF NOT EXISTS message_chunks (
 );
 
 -- What the assistant has learned about the user.
+--
+-- `status` rather than deletion: a memory that stopped being true is history the
+-- user is entitled to see, and `superseded_by` is the thread back to what
+-- replaced it. `norm_text` is the normalised form, so re-remembering the same
+-- sentence is an indexed lookup instead of a model call.
 CREATE TABLE IF NOT EXISTS memories (
-    id         TEXT PRIMARY KEY,
-    kind       TEXT NOT NULL,
-    text       TEXT NOT NULL,
-    source     TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    text          TEXT NOT NULL,
+    source        TEXT,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    origin        TEXT NOT NULL DEFAULT 'assistant',
+    superseded_by TEXT,
+    valid_from    INTEGER,
+    valid_to      INTEGER,
+    norm_text     TEXT NOT NULL DEFAULT '',
+    use_count     INTEGER NOT NULL DEFAULT 0,
+    last_used_at  INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS idx_memories_live
+    ON memories(status, kind, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_norm
+    ON memories(norm_text);
+
+CREATE TABLE IF NOT EXISTS memory_vectors (
+    memory_id  TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    model      TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    vec        BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (memory_id, model)
+);
+
+-- No foreign key on purpose: the trail of what was believed and when has to
+-- outlive the row it describes.
+CREATE TABLE IF NOT EXISTS memory_events (
+    id          TEXT PRIMARY KEY,
+    memory_id   TEXT NOT NULL,
+    op          TEXT NOT NULL,
+    before_text TEXT,
+    after_text  TEXT,
+    reason      TEXT,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_events_mem
+    ON memory_events(memory_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,
@@ -169,6 +211,16 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE accounts ADD COLUMN initial_import_done INTEGER NOT NULL DEFAULT 0",
     // Reasoning models emit a chain of thought worth keeping with the answer.
     "ALTER TABLE chat_turns ADD COLUMN reasoning TEXT",
+    // The memory table grew a lifecycle: superseded rows stay as history, and a
+    // normalised form makes re-remembering the same sentence a lookup.
+    "ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'assistant'",
+    "ALTER TABLE memories ADD COLUMN superseded_by TEXT",
+    "ALTER TABLE memories ADD COLUMN valid_from INTEGER",
+    "ALTER TABLE memories ADD COLUMN valid_to INTEGER",
+    "ALTER TABLE memories ADD COLUMN norm_text TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE memories ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE memories ADD COLUMN last_used_at INTEGER",
 ];
 
 impl Store {
@@ -880,48 +932,106 @@ impl Store {
 
     // -- memory -------------------------------------------------------------
 
-    pub fn upsert_memory(&self, m: &MemoryEntry) -> Result<()> {
+    /// Write one memory, creating it or replacing it in place.
+    ///
+    /// `norm_text` is supplied by the caller rather than derived here: the
+    /// normalisation rules belong with the reconciler that also uses them to
+    /// find duplicates, and having two implementations would eventually mean two
+    /// different answers to "is this the same sentence".
+    pub fn put_memory(&self, m: &MemoryEntry, norm_text: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO memories (id, kind, text, source, created_at, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6)
+                "INSERT INTO memories
+                   (id, kind, text, source, created_at, updated_at,
+                    status, origin, superseded_by, valid_from, valid_to, norm_text, use_count)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
                  ON CONFLICT(id) DO UPDATE SET
                    kind=excluded.kind, text=excluded.text,
-                   source=excluded.source, updated_at=excluded.updated_at",
+                   source=excluded.source, updated_at=excluded.updated_at,
+                   status=excluded.status, origin=excluded.origin,
+                   superseded_by=excluded.superseded_by,
+                   valid_from=excluded.valid_from, valid_to=excluded.valid_to,
+                   norm_text=excluded.norm_text",
                 params![
                     m.id,
                     memory_kind_str(m.kind),
                     m.text,
                     m.source,
                     m.created_at,
-                    m.updated_at
+                    m.updated_at,
+                    memory_status_str(m.status),
+                    memory_origin_str(m.origin),
+                    m.superseded_by,
+                    m.valid_from,
+                    m.valid_to,
+                    norm_text,
+                    m.use_count,
                 ],
             )?;
             Ok(())
         })
     }
 
+    /// Every memory still believed, newest first.
     pub fn list_memories(&self) -> Result<Vec<MemoryEntry>> {
         self.with(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id, kind, text, source, created_at, updated_at
-                 FROM memories ORDER BY updated_at DESC",
-            )?;
+            let mut stmt = c.prepare(&format!(
+                "{MEMORY_COLS} WHERE status='active' ORDER BY updated_at DESC"
+            ))?;
             let rows = stmt.query_map([], row_to_memory)?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
 
-    /// One memory by id, or `None` when it is gone.
+    /// Retired memories, newest first. History for the settings screen; never
+    /// injected into a prompt.
+    pub fn superseded_memories(&self, limit: u32) -> Result<Vec<MemoryEntry>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "{MEMORY_COLS} WHERE status='superseded' ORDER BY updated_at DESC LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(params![limit as i64], row_to_memory)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// One memory by id whatever its status, or `None` when it is gone.
     pub fn get_memory(&self, id: &str) -> Result<Option<MemoryEntry>> {
         self.with(|c| {
+            Ok(c.query_row(&format!("{MEMORY_COLS} WHERE id=?1"), params![id], row_to_memory)
+                .optional()?)
+        })
+    }
+
+    /// The active memory whose normalised text is exactly this, if there is one.
+    ///
+    /// The fast path of the write side: a model that re-remembers the same
+    /// preference every session costs one indexed lookup instead of a
+    /// reconciliation call.
+    pub fn memory_by_norm(&self, norm_text: &str) -> Result<Option<MemoryEntry>> {
+        self.with(|c| {
             Ok(c.query_row(
-                "SELECT id, kind, text, source, created_at, updated_at
-                 FROM memories WHERE id=?1",
-                params![id],
+                &format!("{MEMORY_COLS} WHERE status='active' AND norm_text=?1 LIMIT 1"),
+                params![norm_text],
                 row_to_memory,
             )
             .optional()?)
+        })
+    }
+
+    /// Active preferences, most recently useful first.
+    ///
+    /// Preferences are about *how* to answer, so they apply to a question whose
+    /// words match nothing — which is why they are fetched by recency of use
+    /// rather than by relevance.
+    pub fn standing_preferences(&self, limit: u32) -> Result<Vec<MemoryEntry>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "{MEMORY_COLS} WHERE status='active' AND kind='preference'
+                 ORDER BY COALESCE(last_used_at, updated_at) DESC LIMIT ?1"
+            ))?;
+            let rows = stmt.query_map(params![limit as i64], row_to_memory)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
 
@@ -935,22 +1045,214 @@ impl Store {
         })
     }
 
-    /// Free-text lookup so the assistant can pull only what is relevant
-    /// instead of pasting the whole memory into every prompt.
+    /// Retire `old_id` in favour of `new_id`, in one transaction with nothing
+    /// deleted. `at` becomes the moment the old statement stopped being true.
+    pub fn supersede_memory(&self, old_id: &str, new_id: &str, at: i64) -> Result<()> {
+        self.with_tx(|tx| {
+            tx.execute(
+                "UPDATE memories
+                    SET status='superseded', superseded_by=?2, valid_to=?3, updated_at=?3
+                  WHERE id=?1",
+                params![old_id, new_id, at],
+            )?;
+            // A retired memory must not keep matching a semantic search.
+            tx.execute("DELETE FROM memory_vectors WHERE memory_id=?1", params![old_id])?;
+            Ok(())
+        })
+    }
+
+    /// Record that these memories were put in front of the model. This is the
+    /// signal eviction ranks by, so it is worth one write per answer.
+    pub fn touch_memories(&self, ids: &[String], at: i64) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.with_tx(|tx| {
+            let mut stmt = tx.prepare(
+                "UPDATE memories SET use_count=use_count+1, last_used_at=?2 WHERE id=?1",
+            )?;
+            for id in ids {
+                stmt.execute(params![id, at])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Free-text lookup over active memories, so the assistant can pull only
+    /// what is relevant instead of pasting the whole table into every prompt.
     pub fn search_memories(&self, needle: &str, limit: u32) -> Result<Vec<MemoryEntry>> {
         let needle = needle.trim();
         if needle.is_empty() {
-            return self.list_memories();
+            let mut all = self.list_memories()?;
+            all.truncate(limit as usize);
+            return Ok(all);
         }
         self.with(|c| {
             let pat = format!("%{}%", escape_like(needle));
-            let mut stmt = c.prepare(
-                "SELECT id, kind, text, source, created_at, updated_at FROM memories
-                 WHERE text LIKE ?1 ESCAPE '\\'
-                 ORDER BY updated_at DESC LIMIT ?2",
-            )?;
+            let mut stmt = c.prepare(&format!(
+                "{MEMORY_COLS} WHERE status='active' AND text LIKE ?1 ESCAPE '\\'
+                 ORDER BY updated_at DESC LIMIT ?2"
+            ))?;
             let rows = stmt.query_map(params![pat, limit as i64], row_to_memory)?;
             Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    // -- memory vectors -----------------------------------------------------
+
+    pub fn put_memory_vector(
+        &self,
+        memory_id: &str,
+        model: &str,
+        vec: &[f32],
+        now: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO memory_vectors (memory_id, model, dim, vec, created_at)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(memory_id, model) DO UPDATE SET
+                   dim=excluded.dim, vec=excluded.vec, created_at=excluded.created_at",
+                params![memory_id, model, vec.len() as i64, encode_vector(vec), now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Vectors of every active memory under one model. Small by construction —
+    /// the table is capped — so a linear scan is the whole search.
+    pub fn active_memory_vectors(&self, model: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT v.memory_id, v.vec FROM memory_vectors v
+                 JOIN memories m ON m.id = v.memory_id
+                 WHERE v.model=?1 AND m.status='active'",
+            )?;
+            let rows = stmt.query_map(params![model], |r| {
+                let id: String = r.get(0)?;
+                let blob: Vec<u8> = r.get(1)?;
+                Ok((id, decode_vector(&blob)))
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    // -- memory audit trail --------------------------------------------------
+
+    pub fn append_memory_event(&self, e: &MemoryEvent) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO memory_events
+                   (id, memory_id, op, before_text, after_text, reason, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![e.id, e.memory_id, e.op, e.before_text, e.after_text, e.reason, e.created_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The trail for one memory, or for everything when `memory_id` is `None`.
+    pub fn memory_events(&self, memory_id: Option<&str>, limit: u32) -> Result<Vec<MemoryEvent>> {
+        self.with(|c| {
+            let to_event = |r: &Row<'_>| {
+                Ok(MemoryEvent {
+                    id: r.get(0)?,
+                    memory_id: r.get(1)?,
+                    op: r.get(2)?,
+                    before_text: r.get(3)?,
+                    after_text: r.get(4)?,
+                    reason: r.get(5)?,
+                    created_at: r.get(6)?,
+                })
+            };
+            const COLS: &str =
+                "SELECT id, memory_id, op, before_text, after_text, reason, created_at
+                 FROM memory_events";
+            // One `?` bound either way, so the two branches differ only in SQL —
+            // and the rows have to be collected while the statement is alive.
+            let (sql, bind) = match memory_id {
+                Some(id) => (
+                    format!("{COLS} WHERE memory_id=?2 ORDER BY created_at DESC LIMIT ?1"),
+                    Some(id.to_string()),
+                ),
+                None => (format!("{COLS} ORDER BY created_at DESC LIMIT ?1"), None),
+            };
+            let mut stmt = c.prepare(&sql)?;
+            let rows = match &bind {
+                Some(id) => stmt
+                    .query_map(params![limit as i64, id], to_event)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                None => stmt
+                    .query_map(params![limit as i64], to_event)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            };
+            Ok(rows)
+        })
+    }
+
+    // -- memory housekeeping -------------------------------------------------
+
+    pub fn count_active_memories(&self) -> Result<u32> {
+        self.with(|c| {
+            let n: i64 =
+                c.query_row("SELECT COUNT(*) FROM memories WHERE status='active'", [], |r| {
+                    r.get(0)
+                })?;
+            Ok(n as u32)
+        })
+    }
+
+    /// Retire the least useful assistant-written facts until `keep` remain.
+    ///
+    /// Preferences and anything the user typed are never evicted: they are small
+    /// in number, they are what personalisation actually is, and losing a
+    /// hand-written line to an automatic sweep would be indefensible. Ranking is
+    /// by use, then by how long ago that use was.
+    pub fn evict_memories(&self, keep: u32, at: i64) -> Result<u32> {
+        self.with_tx(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM memories
+                  WHERE status='active' AND origin='assistant' AND kind<>'preference'
+                  ORDER BY use_count ASC, COALESCE(last_used_at, updated_at) ASC",
+            )?;
+            let ranked: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+
+            let total: i64 =
+                tx.query_row("SELECT COUNT(*) FROM memories WHERE status='active'", [], |r| {
+                    r.get(0)
+                })?;
+            let excess = (total - keep as i64).max(0) as usize;
+            let doomed = &ranked[..excess.min(ranked.len())];
+
+            for id in doomed {
+                tx.execute(
+                    "UPDATE memories SET status='superseded', valid_to=?2, updated_at=?2
+                      WHERE id=?1",
+                    params![id, at],
+                )?;
+                tx.execute("DELETE FROM memory_vectors WHERE memory_id=?1", params![id])?;
+            }
+            Ok(doomed.len() as u32)
+        })
+    }
+
+    /// Delete superseded rows retired before `before`, and trim the trail to its
+    /// newest `keep_events` entries.
+    pub fn prune_memory_history(&self, before: i64, keep_events: u32) -> Result<u32> {
+        self.with_tx(|tx| {
+            let gone = tx.execute(
+                "DELETE FROM memories WHERE status='superseded' AND updated_at < ?1",
+                params![before],
+            )?;
+            tx.execute(
+                "DELETE FROM memory_events WHERE id NOT IN
+                   (SELECT id FROM memory_events ORDER BY created_at DESC LIMIT ?1)",
+                params![keep_events as i64],
+            )?;
+            Ok(gone as u32)
         })
     }
 
@@ -1194,8 +1496,44 @@ fn parse_chat_role(s: &str) -> ChatRole {
     }
 }
 
+/// The column list every memory query selects, so `row_to_memory` can read one
+/// fixed shape instead of one per call site.
+const MEMORY_COLS: &str = "SELECT id, kind, text, source, created_at, updated_at,
+        status, origin, superseded_by, valid_from, valid_to, use_count
+   FROM memories";
+
+fn memory_status_str(s: MemoryStatus) -> &'static str {
+    match s {
+        MemoryStatus::Active => "active",
+        MemoryStatus::Superseded => "superseded",
+    }
+}
+
+fn parse_memory_status(s: &str) -> MemoryStatus {
+    match s {
+        "superseded" => MemoryStatus::Superseded,
+        _ => MemoryStatus::Active,
+    }
+}
+
+fn memory_origin_str(o: MemoryOrigin) -> &'static str {
+    match o {
+        MemoryOrigin::User => "user",
+        MemoryOrigin::Assistant => "assistant",
+    }
+}
+
+fn parse_memory_origin(s: &str) -> MemoryOrigin {
+    match s {
+        "user" => MemoryOrigin::User,
+        _ => MemoryOrigin::Assistant,
+    }
+}
+
 fn row_to_memory(r: &Row<'_>) -> rusqlite::Result<MemoryEntry> {
     let kind: String = r.get(1)?;
+    let status: String = r.get(6)?;
+    let origin: String = r.get(7)?;
     Ok(MemoryEntry {
         id: r.get(0)?,
         kind: parse_memory_kind(&kind),
@@ -1203,6 +1541,12 @@ fn row_to_memory(r: &Row<'_>) -> rusqlite::Result<MemoryEntry> {
         source: r.get(3)?,
         created_at: r.get(4)?,
         updated_at: r.get(5)?,
+        status: parse_memory_status(&status),
+        origin: parse_memory_origin(&origin),
+        superseded_by: r.get(8)?,
+        valid_from: r.get(9)?,
+        valid_to: r.get(10)?,
+        use_count: r.get::<_, i64>(11)?.max(0) as u32,
     })
 }
 
@@ -1508,21 +1852,33 @@ mod tests {
     }
 
     #[test]
-    fn a_memory_is_looked_up_by_key() {
+    fn a_memory_is_looked_up_by_key_or_by_its_normalised_text() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.get_memory("mem1").unwrap().is_none());
-        s.upsert_memory(&MemoryEntry {
-            id: "mem1".into(),
-            kind: MemoryKind::Contact,
-            text: "老王是 wang@example.com".into(),
-            source: None,
-            created_at: 7,
-            updated_at: 7,
-        })
+        s.put_memory(
+            &MemoryEntry {
+                id: "mem1".into(),
+                kind: MemoryKind::Contact,
+                text: "老王是 wang@example.com".into(),
+                created_at: 7,
+                updated_at: 7,
+                ..Default::default()
+            },
+            "老王是 wang@example.com",
+        )
         .unwrap();
         let got = s.get_memory("mem1").unwrap().expect("stored");
         assert_eq!(got.kind, MemoryKind::Contact);
         assert_eq!(got.created_at, 7);
+        assert_eq!(got.status, MemoryStatus::Active);
+        assert_eq!(got.origin, MemoryOrigin::Assistant, "a stored row defaults to inferred");
+
+        // The write path's fast lane: the same sentence again is an indexed hit.
+        assert_eq!(
+            s.memory_by_norm("老王是 wang@example.com").unwrap().map(|m| m.id).as_deref(),
+            Some("mem1")
+        );
+        assert!(s.memory_by_norm("别的内容").unwrap().is_none());
     }
 
     /// A batch is one transaction. The visible contract is all-or-nothing plus
