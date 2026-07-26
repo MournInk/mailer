@@ -1011,6 +1011,38 @@ pub struct McpServerInput {
     pub enabled: bool,
 }
 
+/// Refuse to send credentials over a cleartext link.
+///
+/// An authenticated `http://` endpoint hands the key to anyone on the path.
+/// Loopback is exempt because there is no path — a local bridge is the normal
+/// way to run one of these, and there is nothing to intercept.
+fn insecure_endpoint(input: &McpServerInput) -> Option<String> {
+    if input.transport != McpTransport::Http || input.auth == McpAuth::None {
+        return None;
+    }
+    let url = input.url.trim().to_ascii_lowercase();
+    let rest = url.strip_prefix("http://")?;
+    // A bracketed IPv6 literal carries its own colons, so the port separator
+    // cannot simply be the first one.
+    let host = match rest.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().map(|h| format!("[{h}]")).unwrap_or_default(),
+        None => rest.split(['/', ':', '?']).next().unwrap_or("").to_string(),
+    };
+    let host = host.as_str();
+    let local = host == "localhost"
+        || host == "127.0.0.1"
+        || host == "[::1]"
+        || host == "::1"
+        || host.ends_with(".localhost");
+    if local {
+        return None;
+    }
+    Some(format!(
+        "「{}」用 http:// 连接并且带了密钥，密钥会以明文经过网络。请改用 https://（本机地址除外）。",
+        input.name.trim()
+    ))
+}
+
 fn merge_mcp(old: Option<&McpServerConfig>, input: McpServerInput) -> McpServerConfig {
     McpServerConfig {
         id: input.id.filter(|id| !id.is_empty()).unwrap_or_else(new_id),
@@ -1024,7 +1056,24 @@ fn merge_mcp(old: Option<&McpServerConfig>, input: McpServerInput) -> McpServerC
         ),
         command: input.command.trim().to_string(),
         args: input.args.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect(),
-        env: input.env,
+        // Same rule as `api_key`: a blank value means "keep what is stored",
+        // because that is all the form was ever shown. A name the user removed
+        // is still removed — only values present-but-empty are restored.
+        env: {
+            let stored = old.map(|o| o.env.clone()).unwrap_or_default();
+            input
+                .env
+                .into_iter()
+                .map(|(k, v)| {
+                    if v.is_empty() {
+                        let kept = stored.get(&k).cloned().unwrap_or_default();
+                        (k, kept)
+                    } else {
+                        (k, v)
+                    }
+                })
+                .collect()
+        },
         enabled: input.enabled,
     }
 }
@@ -1044,6 +1093,9 @@ pub async fn save_mcp_server(
 ) -> CmdResult<Vec<McpServerPublic>> {
     if input.name.trim().is_empty() {
         return Err("请给这个服务器起一个名字".into());
+    }
+    if let Some(why) = insecure_endpoint(&input) {
+        return Err(why);
     }
     let store = state.engine.store();
     let mut servers = store.mcp_servers().map_err(err_str)?;
@@ -1559,6 +1611,118 @@ fn new_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn mcp_input(url: &str, auth: McpAuth, transport: McpTransport) -> McpServerInput {
+        McpServerInput {
+            id: None,
+            name: "exa".into(),
+            transport,
+            url: url.into(),
+            auth,
+            api_key: Some("secret".into()),
+            command: String::new(),
+            args: Vec::new(),
+            env: Default::default(),
+            enabled: true,
+        }
+    }
+
+    /// A key sent over cleartext is a key handed to whoever is on the path.
+    #[test]
+    fn an_authenticated_http_endpoint_is_refused() {
+        let bad = mcp_input("http://mcp.example.com/v1", McpAuth::Bearer, McpTransport::Http);
+        assert!(insecure_endpoint(&bad).is_some());
+    }
+
+    /// Loopback has no path to intercept, and a local bridge is the normal way
+    /// to run one of these.
+    #[test]
+    fn loopback_is_allowed_to_stay_plain() {
+        for url in [
+            "http://localhost:8080/mcp",
+            "http://127.0.0.1:3000",
+            "http://[::1]:9000/mcp",
+        ] {
+            let input = mcp_input(url, McpAuth::Bearer, McpTransport::Http);
+            assert!(insecure_endpoint(&input).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn https_and_unauthenticated_and_stdio_are_all_fine() {
+        assert!(insecure_endpoint(&mcp_input(
+            "https://mcp.example.com",
+            McpAuth::Bearer,
+            McpTransport::Http
+        ))
+        .is_none());
+        // Nothing secret to leak.
+        assert!(insecure_endpoint(&mcp_input(
+            "http://mcp.example.com",
+            McpAuth::None,
+            McpTransport::Http
+        ))
+        .is_none());
+        // stdio never touches the network.
+        assert!(insecure_endpoint(&mcp_input("", McpAuth::Bearer, McpTransport::Stdio)).is_none());
+    }
+
+    /// `env` on a stdio server is where tokens live, so the public DTO must
+    /// not carry the values — only which names are set.
+    #[test]
+    fn stdio_env_values_never_reach_the_frontend() {
+        let cfg = McpServerConfig {
+            id: "s1".into(),
+            name: "github".into(),
+            transport: McpTransport::Stdio,
+            url: String::new(),
+            auth: McpAuth::None,
+            api_key: String::new(),
+            command: "npx".into(),
+            args: vec!["-y".into()],
+            env: [("GITHUB_TOKEN".to_string(), "ghp_verysecret".to_string())]
+                .into_iter()
+                .collect(),
+            enabled: true,
+        };
+        let public = McpServerPublic::from(&cfg);
+        assert_eq!(public.env.get("GITHUB_TOKEN").map(String::as_str), Some(""));
+        assert!(!format!("{:?}", public).contains("verysecret"));
+    }
+
+    /// And a blank value coming back from that form keeps what was stored,
+    /// exactly as a blank api_key does — otherwise saving any other field
+    /// would wipe the token.
+    #[test]
+    fn a_blank_env_value_keeps_the_stored_secret() {
+        let old = McpServerConfig {
+            id: "s1".into(),
+            name: "github".into(),
+            transport: McpTransport::Stdio,
+            url: String::new(),
+            auth: McpAuth::None,
+            api_key: String::new(),
+            command: "npx".into(),
+            args: vec![],
+            env: [
+                ("GITHUB_TOKEN".to_string(), "ghp_verysecret".to_string()),
+                ("GONE".to_string(), "x".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            enabled: true,
+        };
+        let mut input = mcp_input("", McpAuth::None, McpTransport::Stdio);
+        input.name = "github".into();
+        // The form round-trips the blanked value, and drops "GONE" entirely.
+        input.env = [("GITHUB_TOKEN".to_string(), String::new())].into_iter().collect();
+
+        let merged = merge_mcp(Some(&old), input);
+        assert_eq!(merged.env.get("GITHUB_TOKEN").map(String::as_str), Some("ghp_verysecret"));
+        assert!(!merged.env.contains_key("GONE"), "a removed name stays removed");
+    }
+
     use super::*;
 
     fn stored_ai() -> AiSettings {

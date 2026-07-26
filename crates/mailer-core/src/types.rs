@@ -959,6 +959,10 @@ pub struct McpServerPublic {
     pub has_api_key: bool,
     pub command: String,
     pub args: Vec<String>,
+    /// Variable names only — every value is blanked. A stdio server is
+    /// configured by handing it credentials (`GITHUB_TOKEN`, `EXA_API_KEY`),
+    /// so this map is as secret as `api_key` and is redacted the same way.
+    /// The names stay because the form has to show which ones are set.
     pub env: std::collections::BTreeMap<String, String>,
     pub enabled: bool,
 }
@@ -974,7 +978,7 @@ impl From<&McpServerConfig> for McpServerPublic {
             has_api_key: !s.api_key.is_empty(),
             command: s.command.clone(),
             args: s.args.clone(),
-            env: s.env.clone(),
+            env: s.env.keys().map(|k| (k.clone(), String::new())).collect(),
             enabled: s.enabled,
         }
     }

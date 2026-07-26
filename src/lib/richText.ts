@@ -147,8 +147,20 @@ const SANITIZE = {
   FORBID_TAGS: [
     "script", "iframe", "object", "embed", "form", "style", "link", "base",
     "meta", "input", "button", "select", "textarea", "noscript",
+    // Everything else that fetches. Removing <img> in the hook below was not
+    // enough: <video>, <audio> and their <source>/<track> children each load a
+    // remote URL on their own, which is the same tracking pixel wearing a
+    // different tag — and this app blocks those in mail, so an answer must not
+    // be the way one gets through.
+    "video", "audio", "source", "track", "picture", "svg", "math",
+    "frame", "frameset", "applet", "portal",
   ],
-  FORBID_ATTR: ["srcset", "background", "ping", "formaction", "style"],
+  // `src` and `poster` are the two that fetch. Nothing that survives the tag
+  // list above has any use for either, so they go rather than being policed.
+  FORBID_ATTR: [
+    "srcset", "background", "ping", "formaction", "style", "src", "poster",
+    "data", "lowsrc", "dynsrc",
+  ],
   // No remote fetch of any kind from an answer: an <img> the model was talked
   // into emitting would be a tracking pixel with the user's IP on it.
   ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
@@ -174,6 +186,8 @@ export function renderRichText(source: string): string {
       node.setAttribute("rel", "noopener noreferrer nofollow");
     }
     // A Markdown image in a chat answer is always remote and never wanted.
+    // Belt and braces with the tag/attribute lists above: this one is written
+    // by `![...](...)` rather than by raw HTML, so it never reaches them.
     if (node.tagName === "IMG") node.remove();
   };
 

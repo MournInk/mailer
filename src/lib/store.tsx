@@ -419,15 +419,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (ids.length === 0) return;
       const gone = new Set(ids);
 
-      // Hide them now. Computed from the current page rather than counted inside
-      // the updater: React invokes updaters twice under StrictMode, and a
-      // counter incremented in there would decrement the totals twice.
-      const cur = pageRef.current;
-      const dropped = cur.items.filter((m) => gone.has(m.id));
-      setPage({
-        items: cur.items.filter((m) => !gone.has(m.id)),
-        total: Math.max(0, cur.total - dropped.length),
-        unread: Math.max(0, cur.unread - dropped.filter((m) => m.unread).length),
+      // Hide them now, deriving the new page from the latest state rather than
+      // from a ref snapshot: two deletes issued before React commits would
+      // both read the same stale page, and the second would put back what the
+      // first removed. The updater stays pure — it counts what it is dropping
+      // instead of mutating a counter — so StrictMode running it twice gives
+      // the same answer both times.
+      setPage((cur) => {
+        const dropped = cur.items.filter((m) => gone.has(m.id));
+        return {
+          items: cur.items.filter((m) => !gone.has(m.id)),
+          total: Math.max(0, cur.total - dropped.length),
+          unread: Math.max(0, cur.unread - dropped.filter((m) => m.unread).length),
+        };
       });
       const wasOpen = selectedId !== null && gone.has(selectedId);
       if (wasOpen) {
