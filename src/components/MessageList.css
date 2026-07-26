@@ -1,0 +1,409 @@
+/* Message list — the dense middle column. Tight vertical rhythm, crisp 1px
+   rules between rows, one accent moment per row (unread dot / star). */
+
+.ml-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-raised);
+  border-right: 1px solid var(--line);
+}
+
+/* -- header --------------------------------------------------------------- */
+
+.ml-header {
+  flex: none;
+  padding: 10px 12px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+.ml-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.ml-search-icon {
+  position: absolute;
+  left: 11px;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+/* two classes so these beat `.input` / `.icon-btn` from base.css regardless of
+   the order the bundler injects the stylesheets in */
+.ml-search .ml-search-input {
+  padding-left: 33px;
+  padding-right: 34px;
+  background: var(--surface);
+  font-size: var(--text-sm);
+  appearance: none;
+}
+
+/* the native search affordance duplicates our own clear button */
+.ml-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.ml-search .ml-search-clear {
+  position: absolute;
+  right: 4px;
+  width: 26px;
+  height: 26px;
+  color: var(--ink-3);
+}
+
+/* -- scope line ------------------------------------------------------------ */
+
+.ml-scope {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 7px 0 6px 2px;
+}
+
+.ml-scope-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-2);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ml-scope-hint {
+  font-size: var(--text-xs);
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ml-scope-count {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.ml-scope-unread {
+  flex: none;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ml-scope .ml-refresh {
+  flex: none;
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+}
+
+@keyframes ml-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ml-spin {
+  animation: ml-spin 900ms linear infinite;
+  color: var(--accent);
+}
+
+/* -- scroll container ------------------------------------------------------ */
+
+.ml-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+}
+
+/* -- row ------------------------------------------------------------------- */
+
+.ml-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 8px 10px 12px;
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.ml-row:hover {
+  background: var(--surface-hover);
+}
+
+.ml-row.selected {
+  background: var(--surface);
+}
+
+.ml-row.selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -1px;
+  bottom: -1px;
+  width: 3px;
+  background: var(--accent);
+}
+
+/* keyboard cursor is only meaningful while the list itself has focus */
+.ml-scroll:focus .ml-row.is-cursor {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.ml-row-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: transparent;
+}
+.ml-row.unread .ml-row-dot {
+  background: var(--accent);
+}
+
+.ml-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.ml-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ml-line-top {
+  align-items: baseline;
+  gap: 8px;
+}
+.ml-line + .ml-line {
+  margin-top: 2px;
+}
+
+.ml-from {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-base);
+  font-weight: 500;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ml-row.unread .ml-from {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.ml-date {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ml-row.unread .ml-date {
+  color: var(--ink-2);
+}
+
+.ml-subject {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 450;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ml-row.unread .ml-subject {
+  font-weight: 550;
+  color: var(--ink);
+}
+
+.ml-clip {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.ml-preview {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ml-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+/* verification code readable straight from the list */
+.ml-code {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--cat-verification-soft);
+  color: var(--cat-verification);
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+.ml-code:hover {
+  border-color: color-mix(in srgb, var(--cat-verification) 45%, transparent);
+}
+.ml-code-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+}
+
+.ml-star {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-top: -1px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-faint);
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.ml-star:hover {
+  background: var(--surface-active);
+  color: var(--ink-2);
+}
+.ml-star.on {
+  color: var(--accent);
+}
+/* CSS beats the svg's fill presentation attribute */
+.ml-star.on svg {
+  fill: currentColor;
+}
+
+/* -- paging footer --------------------------------------------------------- */
+
+.ml-more {
+  padding: 12px;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+
+/* -- empty ----------------------------------------------------------------- */
+
+.ml-empty-hint {
+  max-width: 24em;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+/* -- skeletons ------------------------------------------------------------- */
+
+.ml-skel-row {
+  padding: 12px 12px 13px 26px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ml-skel-bar {
+  height: 9px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--surface-2) 0%,
+    var(--line) 45%,
+    var(--surface-2) 90%
+  );
+  background-size: 420px 100%;
+  animation: ml-shimmer 1400ms linear infinite;
+}
+
+.ml-skel-from {
+  width: 38%;
+}
+.ml-skel-subject {
+  width: 72%;
+  margin-top: 9px;
+}
+.ml-skel-preview {
+  width: 54%;
+  margin-top: 8px;
+  height: 8px;
+}
+
+/* stagger so the block reads as a list, not one slab */
+.ml-skel-row:nth-child(2) .ml-skel-bar {
+  animation-delay: 80ms;
+}
+.ml-skel-row:nth-child(3) .ml-skel-bar {
+  animation-delay: 160ms;
+}
+.ml-skel-row:nth-child(4) .ml-skel-bar {
+  animation-delay: 240ms;
+}
+.ml-skel-row:nth-child(5) .ml-skel-bar {
+  animation-delay: 320ms;
+}
+.ml-skel-row:nth-child(6) .ml-skel-bar {
+  animation-delay: 400ms;
+}
+
+@keyframes ml-shimmer {
+  from {
+    background-position: -420px 0;
+  }
+  to {
+    background-position: 420px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ml-spin,
+  .ml-skel-bar {
+    animation: none;
+  }
+}
+
+/* narrow windows: the list becomes the primary pane — keep it comfortable */
+@media (max-width: 900px) {
+  .ml-row {
+    padding: 11px 10px 12px 14px;
+  }
+  .ml-row .ml-star {
+    width: 30px;
+    height: 30px;
+  }
+}

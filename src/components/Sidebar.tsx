@@ -150,7 +150,7 @@ export function Sidebar() {
                 className={`acct-row${active ? " active" : ""}`}
                 title={`${a.label} · ${a.email}`}
                 aria-current={active ? "true" : undefined}
-                // clicking the active account clears the filter again
+                /* clicking the active account clears the filter again */
                 onClick={() => setFilter({ accountId: active ? null : a.id })}
               >
                 <span
@@ -225,7 +225,7 @@ function NavRow({
       className={`nav-row${active ? " active" : ""}${isStatic ? " static" : ""}`}
       title={title ?? label}
       aria-current={active ? "true" : undefined}
-      // not `disabled` — a disabled button swallows its own tooltip
+      /* not `disabled`: a disabled button swallows its own tooltip */
       aria-disabled={isStatic ? "true" : undefined}
       onClick={isStatic ? undefined : onClick}
     >
