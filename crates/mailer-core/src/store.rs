@@ -104,6 +104,29 @@ CREATE TABLE IF NOT EXISTS message_vectors (
     PRIMARY KEY (message_id, model)
 );
 
+-- Deep index over starred mail.
+--
+-- `message_vectors` holds one vector per message, built from the subject, the
+-- sender and the opening of the body — enough to find a message, never enough to
+-- answer a question from inside a long one. Starring is the user's own statement
+-- that a message matters, so those get chunked and embedded whole, and the chunk
+-- text is kept alongside its vector so a hit can quote the passage that matched
+-- rather than the top of the mail.
+--
+-- Separate table rather than a `chunk` column on `message_vectors`: that would
+-- mean rewriting an existing primary key, and the two indexes answer different
+-- questions anyway (which message, versus which passage).
+CREATE TABLE IF NOT EXISTS message_chunks (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    model      TEXT NOT NULL,
+    chunk      INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    vec        BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (message_id, model, chunk)
+);
+
 -- What the assistant has learned about the user.
 CREATE TABLE IF NOT EXISTS memories (
     id         TEXT PRIMARY KEY,
@@ -661,10 +684,7 @@ impl Store {
 
     /// Store one message vector. Replaces any previous vector for this model.
     pub fn put_vector(&self, message_id: &str, model: &str, vec: &[f32], now: i64) -> Result<()> {
-        let mut bytes = Vec::with_capacity(vec.len() * 4);
-        for v in vec {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
+        let bytes = encode_vector(vec);
         self.with(|c| {
             c.execute(
                 "INSERT INTO message_vectors (message_id, model, dim, vec, created_at)
@@ -727,7 +747,134 @@ impl Store {
 
     pub fn clear_vectors(&self, model: &str) -> Result<usize> {
         self.with(|c| {
-            Ok(c.execute("DELETE FROM message_vectors WHERE model=?1", params![model])?)
+            let chunks = c.execute("DELETE FROM message_chunks WHERE model=?1", params![model])?;
+            let whole = c.execute("DELETE FROM message_vectors WHERE model=?1", params![model])?;
+            Ok(chunks + whole)
+        })
+    }
+
+    // -- deep index over starred mail ---------------------------------------
+
+    /// Replace every chunk of one message under `model`.
+    ///
+    /// All or nothing: a half-written message would answer questions from the
+    /// paragraphs that happened to make it in, and look complete doing it.
+    pub fn put_chunks(
+        &self,
+        message_id: &str,
+        model: &str,
+        chunks: &[(String, Vec<f32>)],
+        now: i64,
+    ) -> Result<()> {
+        self.with_tx(|c| {
+            c.execute(
+                "DELETE FROM message_chunks WHERE message_id=?1 AND model=?2",
+                params![message_id, model],
+            )?;
+            let mut stmt = c.prepare(
+                "INSERT INTO message_chunks (message_id, model, chunk, text, dim, vec, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            )?;
+            for (i, (text, vec)) in chunks.iter().enumerate() {
+                stmt.execute(params![
+                    message_id,
+                    model,
+                    i as i64,
+                    text,
+                    vec.len() as i64,
+                    encode_vector(vec),
+                    now
+                ])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Every stored chunk vector for `model`, as (message_id, chunk, vector).
+    ///
+    /// Without the text: a scan needs only the vectors, and the passages of every
+    /// starred message would be megabytes to carry through it. The text of the
+    /// few chunks that survive ranking is fetched by [`Store::chunk_text`].
+    pub fn all_chunk_vectors(&self, model: &str) -> Result<Vec<(String, i64, Vec<f32>)>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT k.message_id, k.chunk, k.vec FROM message_chunks k
+                 JOIN messages m ON m.id = k.message_id
+                 WHERE k.model = ?1 AND m.deleted = 0",
+            )?;
+            let rows = stmt.query_map(params![model], |r| {
+                let bytes: Vec<u8> = r.get(2)?;
+                Ok((r.get(0)?, r.get(1)?, decode_vector(&bytes)))
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn chunk_text(&self, message_id: &str, model: &str, chunk: i64) -> Result<Option<String>> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT text FROM message_chunks
+                 WHERE message_id=?1 AND model=?2 AND chunk=?3",
+                params![message_id, model, chunk],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })
+    }
+
+    /// Starred, non-deleted messages with no chunks under `model`, newest first.
+    ///
+    /// Newest first, unlike the whole-message backfill: a message starred a
+    /// minute ago is the one about to be asked about.
+    pub fn starred_missing_chunks(&self, model: &str, limit: u32) -> Result<Vec<EmailMessage>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT m.* FROM messages m
+                 WHERE m.starred = 1 AND m.deleted = 0
+                   AND NOT EXISTS (
+                     SELECT 1 FROM message_chunks k
+                     WHERE k.message_id = m.id AND k.model = ?1
+                   )
+                 ORDER BY m.date DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![model, limit as i64], row_to_message)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// (starred messages with chunks, starred messages) for `model`.
+    pub fn chunk_counts(&self, model: &str) -> Result<(u32, u32)> {
+        self.with(|c| {
+            let total: u32 = c.query_row(
+                "SELECT COUNT(*) FROM messages WHERE starred=1 AND deleted=0",
+                [],
+                |r| r.get(0),
+            )?;
+            let indexed: u32 = c.query_row(
+                "SELECT COUNT(DISTINCT k.message_id) FROM message_chunks k
+                 JOIN messages m ON m.id = k.message_id
+                 WHERE k.model=?1 AND m.starred=1 AND m.deleted=0",
+                params![model],
+                |r| r.get(0),
+            )?;
+            Ok((indexed, total))
+        })
+    }
+
+    /// Drop the deep index for messages that are no longer starred.
+    ///
+    /// Un-starring is a statement too. Keeping the chunks would leave the
+    /// retriever quietly favouring passages the user has since dismissed.
+    pub fn prune_unstarred_chunks(&self) -> Result<usize> {
+        self.with(|c| {
+            Ok(c.execute(
+                "DELETE FROM message_chunks WHERE message_id IN (
+                   SELECT k.message_id FROM message_chunks k
+                   LEFT JOIN messages m ON m.id = k.message_id
+                   WHERE m.id IS NULL OR m.starred = 0 OR m.deleted = 1
+                 )",
+                [],
+            )?)
         })
     }
 
@@ -963,6 +1110,27 @@ impl Store {
     pub fn set_reranker_settings(&self, s: &RerankerSettings) -> Result<()> {
         self.set_setting("reranker", &serde_json::to_string(s)?)
     }
+
+    /// The external MCP servers, in the order the user added them.
+    ///
+    /// A row that will not deserialise is dropped rather than failing the whole
+    /// list: one malformed entry from an older build must not cost the user
+    /// every server they configured.
+    pub fn mcp_servers(&self) -> Result<Vec<McpServerConfig>> {
+        let Some(json) = self.get_setting("mcp_servers")? else {
+            return Ok(Vec::new());
+        };
+        let raw: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
+        Ok(raw
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<McpServerConfig>(v).ok())
+            .filter(|s| !s.id.is_empty())
+            .collect())
+    }
+
+    pub fn set_mcp_servers(&self, servers: &[McpServerConfig]) -> Result<()> {
+        self.set_setting("mcp_servers", &serde_json::to_string(servers)?)
+    }
 }
 
 /// Escape the three characters `LIKE ... ESCAPE '\'` treats specially.
@@ -977,7 +1145,16 @@ fn escape_like(needle: &str) -> String {
         .replace('_', "\\_")
 }
 
-/// Little-endian f32 array as written by `put_vector`.
+/// f32 array as a little-endian blob.
+fn encode_vector(vec: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vec.len() * 4);
+    for v in vec {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
+/// Little-endian f32 array as written by `encode_vector`.
 fn decode_vector(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(4)

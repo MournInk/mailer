@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use mailer_core::mail::{imap, pop3, smtp};
 use mailer_core::sync::{now_ms, SyncEngine};
 use mailer_core::types::*;
-use mailer_core::{ai, assistant, notify, rag};
+use mailer_core::{ai, assistant, mcp, notify, rag};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -18,6 +18,9 @@ type CmdResult<T> = Result<T, String>;
 /// Messages embedded per backfill round trip. Small enough that a failure costs
 /// one request, large enough that a 5000-mail mailbox is not 5000 round trips.
 const INDEX_BATCH: u32 = 32;
+/// Starred messages deep-indexed per round trip. Smaller than `INDEX_BATCH`
+/// because each one is many chunks, not one vector.
+const DEEP_BATCH: u32 = 6;
 /// Conversations listed when the caller does not ask for a number.
 const DEFAULT_CONVERSATIONS: u32 = 100;
 const MAX_CONVERSATIONS: u32 = 500;
@@ -567,6 +570,114 @@ pub fn set_reranker_settings(
 }
 
 // ---------------------------------------------------------------------------
+// MCP servers (outbound: what the assistant may borrow)
+// ---------------------------------------------------------------------------
+
+/// One server as the settings screen submits it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerInput {
+    /// Empty for a new server.
+    pub id: Option<String>,
+    pub name: String,
+    pub transport: McpTransport,
+    pub url: String,
+    pub auth: McpAuth,
+    /// Empty/None keeps the stored key, exactly as the AI settings do.
+    pub api_key: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub enabled: bool,
+}
+
+fn merge_mcp(old: Option<&McpServerConfig>, input: McpServerInput) -> McpServerConfig {
+    McpServerConfig {
+        id: input.id.filter(|id| !id.is_empty()).unwrap_or_else(new_id),
+        name: input.name.trim().to_string(),
+        transport: input.transport,
+        url: input.url.trim().to_string(),
+        auth: input.auth,
+        api_key: keep_secret(
+            input.api_key,
+            old.map(|o| o.api_key.clone()).unwrap_or_default(),
+        ),
+        command: input.command.trim().to_string(),
+        args: input.args.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect(),
+        env: input.env,
+        enabled: input.enabled,
+    }
+}
+
+#[tauri::command]
+pub fn get_mcp_servers(state: State<'_, AppState>) -> CmdResult<Vec<McpServerPublic>> {
+    let servers = state.engine.store().mcp_servers().map_err(err_str)?;
+    Ok(servers.iter().map(McpServerPublic::from).collect())
+}
+
+/// Add or update one server, then forget its session so the next question
+/// connects with what was just saved.
+#[tauri::command]
+pub async fn save_mcp_server(
+    state: State<'_, AppState>,
+    input: McpServerInput,
+) -> CmdResult<Vec<McpServerPublic>> {
+    if input.name.trim().is_empty() {
+        return Err("请给这个服务器起一个名字".into());
+    }
+    let store = state.engine.store();
+    let mut servers = store.mcp_servers().map_err(err_str)?;
+    let existing = input
+        .id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .and_then(|id| servers.iter().position(|s| s.id == id));
+    let merged = merge_mcp(existing.map(|i| &servers[i]), input);
+
+    let id = merged.id.clone();
+    match existing {
+        Some(i) => servers[i] = merged,
+        None => servers.push(merged),
+    }
+    store.set_mcp_servers(&servers).map_err(err_str)?;
+    // The old session still speaks to the old URL with the old key.
+    mcp::hub().forget(&id).await;
+    Ok(servers.iter().map(McpServerPublic::from).collect())
+}
+
+#[tauri::command]
+pub async fn delete_mcp_server(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<McpServerPublic>> {
+    let store = state.engine.store();
+    let mut servers = store.mcp_servers().map_err(err_str)?;
+    servers.retain(|s| s.id != id);
+    store.set_mcp_servers(&servers).map_err(err_str)?;
+    mcp::hub().forget(&id).await;
+    Ok(servers.iter().map(McpServerPublic::from).collect())
+}
+
+/// Connect to every enabled server and report what each one offers.
+///
+/// This is the settings screen's "test" button and its status list at once:
+/// there is nothing to test about an MCP server except whether it connects and
+/// what tools it has.
+#[tauri::command]
+pub async fn mcp_status(state: State<'_, AppState>) -> CmdResult<Vec<McpServerStatus>> {
+    let engine = state.engine.clone();
+    Ok(mcp::hub().status(engine.store(), engine.http()).await)
+}
+
+/// Drop every cached session, so the next call reconnects from scratch.
+#[tauri::command]
+pub async fn reconnect_mcp(state: State<'_, AppState>) -> CmdResult<Vec<McpServerStatus>> {
+    let engine = state.engine.clone();
+    mcp::hub().forget_all().await;
+    Ok(mcp::hub().status(engine.store(), engine.http()).await)
+}
+
+// ---------------------------------------------------------------------------
 // Embedding index
 // ---------------------------------------------------------------------------
 
@@ -658,6 +769,28 @@ pub fn index_pending(app: AppHandle, state: State<'_, AppState>) -> CmdResult<In
                 }
             }
         }
+
+        // Then the deep pass over starred mail. It runs second because the
+        // whole-message index is what makes search work at all; chunking the
+        // starred few only makes it sharper.
+        loop {
+            match rag::index_starred_pending(engine.store(), engine.http(), &settings, DEEP_BATCH)
+                .await
+            {
+                Ok(0) => break,
+                Ok(n) => {
+                    tracing::debug!("index: deep-indexed {n} starred message(s)");
+                    emit_index_status(&app, &engine, &index);
+                }
+                Err(e) => {
+                    let message = e.to_string();
+                    tracing::warn!("index: deep pass stopped: {message}");
+                    index.set_last_error(Some(message));
+                    break;
+                }
+            }
+        }
+
         index.building.store(false, Ordering::SeqCst);
         emit_index_status(&app, &engine, &index);
     });
@@ -1056,6 +1189,8 @@ mod tests {
         IndexStatus {
             indexed: 3,
             total: 10,
+            deep_indexed: 1,
+            deep_total: 2,
             model: "text-embedding-3-small".into(),
             building: false,
             error: Some("尚未配置嵌入接口地址".into()),

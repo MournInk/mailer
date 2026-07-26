@@ -26,7 +26,13 @@ import type {
 
 export type ThemePref = "light" | "dark" | "system";
 export type View = "mail" | "settings";
-export type SettingsTab = "accounts" | "ai" | "knowledge" | "channels" | "about";
+export type SettingsTab =
+  | "accounts"
+  | "ai"
+  | "knowledge"
+  | "tools"
+  | "channels"
+  | "about";
 
 export interface MailFilter {
   accountId: string | null;

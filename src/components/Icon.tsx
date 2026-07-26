@@ -148,6 +148,21 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
     </>
   ),
+  terminal: (
+    <>
+      <path d="m7 9 3 3-3 3" />
+      <path d="M13 15h4" />
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+    </>
+  ),
+  plug: (
+    <>
+      <path d="M9 2v6" />
+      <path d="M15 2v6" />
+      <path d="M6 8h12v3a6 6 0 0 1-12 0z" />
+      <path d="M12 17v5" />
+    </>
+  ),
   copy: (
     <>
       <rect x="8" y="8" width="14" height="14" rx="2" />

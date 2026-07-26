@@ -166,6 +166,12 @@ export function KnowledgeTab() {
 
   const pct =
     index && index.total > 0 ? Math.round((index.indexed / index.total) * 100) : 0;
+  // The deep index is a second pass over starred mail only, so it has its own
+  // denominator — showing it against the whole mailbox would read as stalled.
+  const deepPct =
+    index && index.deepTotal > 0
+      ? Math.round((index.deepIndexed / index.deepTotal) * 100)
+      : 0;
 
   return (
     <>
@@ -317,6 +323,22 @@ export function KnowledgeTab() {
             {index?.model ? ` · 模型 ${index.model}` : ""}
             {index?.building ? " · 正在建立…" : ""}
           </p>
+          {/* Starred mail gets a second, finer pass: the whole body in chunks
+              instead of one vector per message. Hidden until something is
+              starred, because a 0/0 bar looks broken. */}
+          {index != null && index.deepTotal > 0 && (
+            <>
+              <div className="kb-bar" aria-hidden>
+                <span className="kb-bar-fill deep" style={{ width: `${deepPct}%` }} />
+              </div>
+              <p className="kb-index-text">
+                收藏邮件全文精读 <strong>{index.deepIndexed}</strong> / {index.deepTotal} 封
+                <span className="field-hint kb-deep-hint">
+                  收藏的邮件会按段落整篇建立索引，长邮件里的细节也能被问到。
+                </span>
+              </p>
+            </>
+          )}
           {index?.error && (
             <p className="kb-index-error">
               <Icon name="alert" size={13} /> {index.error}

@@ -3,8 +3,8 @@
  * the right. The active tab lives in the store, so `openSettings("ai")` from
  * anywhere in the app lands directly on the right pane.
  *
- * Under 760px the rail folds into a top tab strip — the four labels are short
- * enough to share one row, so nothing ever scrolls sideways.
+ * Under 760px the rail folds into a top tab strip — the labels are short enough
+ * to share one row, so nothing ever scrolls sideways.
  */
 
 import { useEffect } from "react";
@@ -16,6 +16,7 @@ import { AccountsTab } from "./AccountsTab";
 import { AiTab } from "./AiTab";
 import { KnowledgeTab } from "./KnowledgeTab";
 import { ChannelsTab } from "./ChannelsTab";
+import { ToolsTab } from "./ToolsTab";
 import "./Settings.css";
 
 const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }> = [
@@ -36,6 +37,12 @@ const TABS: Array<{ key: SettingsTab; label: string; icon: string; sub: string }
     label: "知识库",
     icon: "archive",
     sub: "语义检索的向量与重排模型，以及助手的记忆",
+  },
+  {
+    key: "tools",
+    label: "外部工具",
+    icon: "plug",
+    sub: "接入 MCP 服务器，让助手能查邮件之外的东西",
   },
   {
     key: "channels",
@@ -115,6 +122,7 @@ export function SettingsView() {
             {settingsTab === "accounts" && <AccountsTab />}
             {settingsTab === "ai" && <AiTab />}
             {settingsTab === "knowledge" && <KnowledgeTab />}
+            {settingsTab === "tools" && <ToolsTab />}
             {settingsTab === "channels" && <ChannelsTab />}
             {settingsTab === "about" && <AboutTab />}
           </div>

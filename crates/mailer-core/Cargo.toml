@@ -10,7 +10,9 @@ authors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# `process` carries the stdio MCP transport (a child speaking JSON-RPC over its
+# pipes); the workspace feature set is tuned for sockets and leaves it out.
+tokio = { workspace = true, features = ["process"] }
 tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true

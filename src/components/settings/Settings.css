@@ -1018,6 +1018,99 @@
   line-height: 1.65;
 }
 
+/* -- external tools (MCP) -------------------------------------------------- */
+
+/* Presets in the empty state: two wide rows rather than a grid, because the
+   hint under each one is the part that decides which to pick. */
+.set-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 46ch;
+  margin-top: 14px;
+  text-align: left;
+}
+
+/* `text-align` on the wrapper is not enough: a button gets `center` from the UA
+   stylesheet rather than inheriting. */
+.set-preset {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 11px 14px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  cursor: pointer;
+  transition: border-color var(--fast), background var(--fast);
+}
+
+.set-preset:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.set-preset-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.set-preset-hint {
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+  line-height: 1.6;
+}
+
+/* Same shape as .set-muted-tag, opposite meaning: this server answered. */
+.set-ok-tag {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ok) 14%, transparent);
+  color: var(--ok);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.set-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.set-tools-head {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* One line per tool: the name in mono, the server's own description after it,
+   clipped. A borrowed catalogue can be forty tools long. */
+.set-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.set-tool-desc {
+  min-width: 0;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* -- about ----------------------------------------------------------------- */
 
 .set-about {
@@ -1355,6 +1448,17 @@
   font-size: var(--text-sm);
   color: var(--ink-2);
   font-variant-numeric: tabular-nums;
+}
+
+/* The deep pass over starred mail: same bar, quieter, so the two are read as
+   one progress story rather than two competing ones. */
+.kb-bar-fill.deep {
+  background: color-mix(in oklab, var(--accent) 55%, var(--surface-2));
+}
+
+.kb-deep-hint {
+  display: block;
+  margin-top: 2px;
 }
 
 .kb-index-error {

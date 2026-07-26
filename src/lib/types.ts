@@ -12,6 +12,10 @@ export type SyncPhase = "idle" | "connecting" | "fetching" | "classifying" | "er
 export type AiProvider = "openai-compatible" | "openai-responses" | "anthropic" | "gemini";
 export type RerankerKind = "none" | "rerank-api" | "llm-scoring";
 export type MemoryKind = "preference" | "fact" | "contact";
+/** How to reach an external MCP server. */
+export type McpTransport = "http" | "stdio";
+/** How the key reaches an HTTP MCP server. There is no standard. */
+export type McpAuth = "none" | "bearer" | "api-key-header";
 export type ChatRole = "user" | "assistant" | "tool";
 
 export interface AccountPublic {
@@ -193,6 +197,52 @@ export interface RerankerSettingsInput {
   topN: number;
 }
 
+/** One external MCP server, as stored. Mirrors `McpServerPublic`. */
+export interface McpServerPublic {
+  id: string;
+  /** Also the namespace its tools are offered under. */
+  name: string;
+  transport: McpTransport;
+  url: string;
+  auth: McpAuth;
+  hasApiKey: boolean;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface McpServerInput {
+  id?: string | null;
+  name: string;
+  transport: McpTransport;
+  url: string;
+  auth: McpAuth;
+  /** empty/undefined keeps the stored key */
+  apiKey?: string | null;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+}
+
+export interface McpToolInfo {
+  /** What the model calls, e.g. `mcp__exa__web_search_exa`. */
+  name: string;
+  /** What the server calls it. */
+  remoteName: string;
+  description: string;
+}
+
+export interface McpServerStatus {
+  id: string;
+  serverName: string;
+  serverVersion: string;
+  protocolVersion: string;
+  tools: McpToolInfo[];
+  error: string | null;
+}
+
 export interface NotifyChannel {
   id: string;
   name: string;
@@ -269,6 +319,10 @@ export interface SearchHit {
 export interface IndexStatus {
   indexed: number;
   total: number;
+  /** starred messages whose whole body has been chunked and embedded */
+  deepIndexed: number;
+  /** starred messages, i.e. what the deep index is working toward */
+  deepTotal: number;
   model: string;
   /** true while a backfill is running */
   building: boolean;
@@ -361,6 +415,17 @@ export const RERANKER_KIND_LABEL: Record<RerankerKind, string> = {
   none: "不重排（按向量相似度）",
   "rerank-api": "重排接口（Jina / Cohere 等）",
   "llm-scoring": "让对话模型打分",
+};
+
+export const MCP_TRANSPORT_LABEL: Record<McpTransport, string> = {
+  http: "远程 HTTP（Streamable HTTP）",
+  stdio: "本地进程（stdio）",
+};
+
+export const MCP_AUTH_LABEL: Record<McpAuth, string> = {
+  none: "无需鉴权",
+  bearer: "Authorization: Bearer",
+  "api-key-header": "x-api-key 请求头",
 };
 
 export const MEMORY_KIND_LABEL: Record<MemoryKind, string> = {

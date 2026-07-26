@@ -6,6 +6,7 @@
 //! - [`net`]     TCP/TLS connection helper shared by protocol clients
 //! - [`mail`]    IMAP / POP3 / SMTP clients + MIME parsing
 //! - [`ai`]      LLM triage (OpenAI-compatible chat completions)
+//! - [`mcp`]     MCP *client*: tools borrowed from external servers
 //! - [`notify`]  external notification channels (Telegram / QQ bot / webhook / Bark)
 //! - [`sync`]    orchestration: fetch → parse → store → classify → act
 
@@ -13,6 +14,7 @@ pub mod ai;
 pub mod assistant;
 pub mod error;
 pub mod mail;
+pub mod mcp;
 pub mod net;
 pub mod notify;
 pub mod rag;

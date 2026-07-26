@@ -22,6 +22,9 @@ import type {
   EmbeddingSettingsInput,
   EmbeddingSettingsPublic,
   IndexStatus,
+  McpServerInput,
+  McpServerPublic,
+  McpServerStatus,
   MemoryEntry,
   MemoryInput,
   MessagePage,
@@ -102,6 +105,22 @@ export const getRerankerSettings = () =>
   invoke<RerankerSettingsPublic>("get_reranker_settings");
 export const setRerankerSettings = (input: RerankerSettingsInput) =>
   invoke<RerankerSettingsPublic>("set_reranker_settings", { input });
+
+// -- MCP servers (tools the assistant borrows) ------------------------------
+
+export const getMcpServers = () => invoke<McpServerPublic[]>("get_mcp_servers");
+export const saveMcpServer = (input: McpServerInput) =>
+  invoke<McpServerPublic[]>("save_mcp_server", { input });
+export const deleteMcpServer = (id: string) =>
+  invoke<McpServerPublic[]>("delete_mcp_server", { id });
+/**
+ * Connect to every enabled server and report what each one offers. This is the
+ * test button and the status list at once — there is nothing else to test about
+ * an MCP server than whether it connects and what tools it has.
+ */
+export const mcpStatus = () => invoke<McpServerStatus[]>("mcp_status");
+/** Drop every cached session and connect again from scratch. */
+export const reconnectMcp = () => invoke<McpServerStatus[]>("reconnect_mcp");
 
 export const indexStatus = () => invoke<IndexStatus>("index_status");
 /**

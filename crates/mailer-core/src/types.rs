@@ -663,10 +663,156 @@ pub struct SearchHit {
 pub struct IndexStatus {
     pub indexed: u32,
     pub total: u32,
+    /// Starred messages whose whole body has been chunked and embedded.
+    pub deep_indexed: u32,
+    /// Starred messages, i.e. how many the deep index is working toward.
+    pub deep_total: u32,
     pub model: String,
     /// Set while a backfill is running.
     pub building: bool,
     pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// MCP (outbound: servers this app connects to as a client)
+// ---------------------------------------------------------------------------
+
+/// How to reach one MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpTransport {
+    /// Streamable HTTP: one URL, POST per request, answers in JSON or SSE.
+    Http,
+    /// A local process speaking newline-delimited JSON over stdin/stdout.
+    Stdio,
+}
+
+impl Default for McpTransport {
+    fn default() -> Self {
+        McpTransport::Http
+    }
+}
+
+/// How a secret reaches an HTTP MCP server. There is no standard: GitHub wants
+/// a bearer token, Exa wants `x-api-key`, and a server behind a gateway may want
+/// neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpAuth {
+    None,
+    /// `Authorization: Bearer <key>`
+    Bearer,
+    /// `x-api-key: <key>`
+    ApiKeyHeader,
+}
+
+impl Default for McpAuth {
+    fn default() -> Self {
+        McpAuth::None
+    }
+}
+
+/// One external MCP server the user configured.
+///
+/// The `name` is not decoration: it is the namespace the server's tools are
+/// offered to the model under, so two servers with a `search` tool stay
+/// distinguishable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub transport: McpTransport,
+    /// HTTP only. The full endpoint, e.g. `https://mcp.exa.ai/mcp`.
+    pub url: String,
+    /// HTTP only.
+    pub auth: McpAuth,
+    /// HTTP only. Never leaves the machine except as the header `auth` names.
+    pub api_key: String,
+    /// stdio only. The executable to run.
+    pub command: String,
+    /// stdio only.
+    pub args: Vec<String>,
+    /// stdio only. Added to the inherited environment.
+    pub env: std::collections::BTreeMap<String, String>,
+    pub enabled: bool,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        McpServerConfig {
+            id: String::new(),
+            name: String::new(),
+            transport: McpTransport::Http,
+            url: String::new(),
+            auth: McpAuth::None,
+            api_key: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            enabled: true,
+        }
+    }
+}
+
+/// A server config as the UI sees it: the key is replaced by whether there is
+/// one, exactly as the AI and reranker settings do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerPublic {
+    pub id: String,
+    pub name: String,
+    pub transport: McpTransport,
+    pub url: String,
+    pub auth: McpAuth,
+    pub has_api_key: bool,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub enabled: bool,
+}
+
+impl From<&McpServerConfig> for McpServerPublic {
+    fn from(s: &McpServerConfig) -> Self {
+        McpServerPublic {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            transport: s.transport,
+            url: s.url.clone(),
+            auth: s.auth,
+            has_api_key: !s.api_key.is_empty(),
+            command: s.command.clone(),
+            args: s.args.clone(),
+            env: s.env.clone(),
+            enabled: s.enabled,
+        }
+    }
+}
+
+/// What one server is currently good for, for the settings screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub id: String,
+    /// The name the server calls itself, which is often not the one the user
+    /// typed.
+    pub server_name: String,
+    pub server_version: String,
+    pub protocol_version: String,
+    /// Tools the assistant can now call, fully qualified.
+    pub tools: Vec<McpToolInfo>,
+    /// Why the last attempt failed, if it did.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolInfo {
+    /// The name the model calls, e.g. `mcp__exa__web_search_exa`.
+    pub name: String,
+    /// The name on the server.
+    pub remote_name: String,
+    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
