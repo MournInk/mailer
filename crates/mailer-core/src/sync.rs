@@ -39,6 +39,15 @@ const WATCH_BACKOFF_MIN: Duration = Duration::from_secs(5);
 const WATCH_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
 /// Room on top of `IDLE_WINDOW` for the connect, login and teardown around it.
 const WATCH_SLACK: Duration = Duration::from_secs(60);
+/// How long the whole external-channel phase may hold up the local alert.
+///
+/// The desktop notification is suppressed only when a channel actually took
+/// delivery, which means the answer has to be known before the popup — but an
+/// unreachable channel sits on the HTTP client's own minute-long timeout, and
+/// the local notification would then be late in precisely the case where it is
+/// the only one left. Past this budget the alert goes out as unrouted: a
+/// duplicate is a far smaller failure than silence.
+const NOTIFY_BUDGET: Duration = Duration::from_secs(5);
 
 /// Whether an account can be watched live.
 ///
@@ -629,13 +638,33 @@ impl SyncEngine {
         // notification because a channel was *supposed* to carry this would
         // mean a mail nobody hears about at all whenever Telegram is down —
         // the one case where the local notification matters most.
+        //
+        // Bounded as a whole: see `NOTIFY_BUDGET`. Delivery that has not landed
+        // by then is still in flight and may well succeed, but the popup stops
+        // waiting for it.
+        let wanted: Vec<&NotifyChannel> = channels
+            .iter()
+            .filter(|ch| ch.enabled && ch.notify_categories.contains(&analysis.category))
+            .collect();
         let mut routed = false;
-        for ch in channels {
-            if ch.enabled && ch.notify_categories.contains(&analysis.category) {
-                match notify::dispatch(&self.http, ch, &payload).await {
-                    Ok(()) => routed = true,
-                    Err(e) => tracing::warn!("channel {} dispatch failed: {e}", ch.name),
+        if !wanted.is_empty() {
+            let http = &self.http;
+            let deliver = async {
+                let mut any = false;
+                for ch in wanted {
+                    match notify::dispatch(http, ch, &payload).await {
+                        Ok(()) => any = true,
+                        Err(e) => tracing::warn!("channel {} dispatch failed: {e}", ch.name),
+                    }
                 }
+                any
+            };
+            match tokio::time::timeout(NOTIFY_BUDGET, deliver).await {
+                Ok(any) => routed = any,
+                Err(_) => tracing::warn!(
+                    "外部通知渠道 {} 秒内未完成，本机通知照常发出",
+                    NOTIFY_BUDGET.as_secs()
+                ),
             }
         }
 
@@ -801,35 +830,34 @@ mod tests {
         );
     }
 
-    /// Releasing the slot and deciding to stop must be one step.
+    /// After a pass, "nothing is running" and "nothing is owed" must agree.
     ///
-    /// A wake arriving between "no follow-up wanted" and "slot released" used
-    /// to find the slot still taken, leave a marker, and return — with nobody
-    /// left to honour it. The loop now takes `in_flight` before checking
-    /// `resync`, so by the time the slot is free the marker cannot exist.
+    /// This is the post-condition, not the interleaving: the race itself — a
+    /// wake landing between the final `resync` check and the slot release — is
+    /// prevented by construction, because both are done under one acquisition
+    /// of `in_flight` in the same order the requesting side uses. There is no
+    /// seam left to drive from a test without a synchronisation hook in
+    /// production code, so this checks the state the fix is supposed to leave
+    /// and the lock ordering carries the rest.
+    ///
+    /// Deliberately uses an unknown account so `sync_account_inner` fails at
+    /// its first store lookup: the release path is what is under test, and a
+    /// test that reaches for a real mail server is a test that depends on DNS
+    /// and can sit through the fetch timeout.
     #[test]
-    fn releasing_the_slot_leaves_no_unhonoured_marker() {
+    fn after_a_pass_the_slot_and_the_marker_agree() {
         let engine = SyncEngine::new(seeded_store(), Box::new(NullSink));
-        // The fetch path is wrapped in a timeout, so the runtime needs timers.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        // The account points at a host that does not exist, so the pass fails —
-        // which is the interesting path anyway: the error branch releases the
-        // slot too, and it has to leave the same clean state.
-        let _ = rt.block_on(engine.sync_account("acc1"));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
 
-        // Nothing is syncing and nothing is owed. Those two have to agree, or a
-        // later wake is either dropped or serviced twice.
+        assert!(rt.block_on(engine.sync_account("nope")).is_err());
         assert!(engine.in_flight.lock().unwrap().is_empty());
         assert!(engine.resync.lock().unwrap().is_empty());
 
-        // And the slot really is free, so the next wake syncs rather than
+        // And the slot really is free, so a later wake syncs rather than
         // leaving a marker for a pass that is not running.
-        let _ = rt.block_on(engine.sync_account("acc1"));
-        assert!(engine.resync.lock().unwrap().is_empty());
+        assert!(rt.block_on(engine.sync_account("nope")).is_err());
         assert!(engine.in_flight.lock().unwrap().is_empty());
+        assert!(engine.resync.lock().unwrap().is_empty());
     }
 
     /// The note is per-account: a busy mailbox must not drag an idle one into

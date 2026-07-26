@@ -219,6 +219,11 @@ export function MessageList() {
 
   const clearPicked = useCallback(() => setPicked(new Set()), []);
 
+  // Read by `toggleAll`, which must not be re-created on every tick of the
+  // selection or the header checkbox would lose its handler mid-interaction.
+  const pickedRef = useRef(picked);
+  pickedRef.current = picked;
+
   // Changing scope is starting again. Keeping the ticks would carry a selection
   // the user can no longer see, which the batch bar would then act on.
   useEffect(() => {
@@ -237,11 +242,18 @@ export function MessageList() {
   const allPicked = items.length > 0 && pickedHere.length === items.length;
   const somePicked = pickedHere.length > 0 && !allPicked;
 
-  /** The header box: none → all, some → all, all → none. */
+  /**
+   * The header box: none → all, some → all, all → none.
+   *
+   * Decided from the visible selection, not from `picked.size`. A background
+   * refresh can leave ids in `picked` that are no longer on the page, and
+   * comparing the raw size against the row count would make the first
+   * "取消全选" click select everything instead of clearing it.
+   */
   const toggleAll = useCallback(() => {
-    setPicked((prev) =>
-      prev.size === items.length ? new Set() : new Set(items.map((m) => m.id)),
-    );
+    const everyRowPicked =
+      items.length > 0 && items.every((m) => pickedRef.current.has(m.id));
+    setPicked(everyRowPicked ? new Set() : new Set(items.map((m) => m.id)));
   }, [items]);
 
   const bulk = useCallback(
