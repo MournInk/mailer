@@ -13,12 +13,23 @@ import type {
   AiSettingsInput,
   AiSettingsPublic,
   AlertEvent,
+  AssistantReply,
   CategoryCount,
+  ChatTurn,
+  Conversation,
   EmailMessage,
+  EmbeddingSettingsInput,
+  EmbeddingSettingsPublic,
+  IndexStatus,
+  MemoryEntry,
+  MemoryInput,
   MessagePage,
   MessageQuery,
   NotifyChannel,
   OutgoingMail,
+  RerankerSettingsInput,
+  RerankerSettingsPublic,
+  SearchHit,
   SyncStatus,
   TestResult,
 } from "./types";
@@ -74,6 +85,60 @@ export const testChannel = (id: string) => invoke<TestResult>("test_channel", { 
 
 export const sendMail = (mail: OutgoingMail) => invoke<void>("send_mail", { mail });
 
+// -- embedding index --------------------------------------------------------
+
+export const getEmbeddingSettings = () =>
+  invoke<EmbeddingSettingsPublic>("get_embedding_settings");
+export const setEmbeddingSettings = (input: EmbeddingSettingsInput) =>
+  invoke<EmbeddingSettingsPublic>("set_embedding_settings", { input });
+export const testEmbedding = () => invoke<TestResult>("test_embedding");
+
+export const getRerankerSettings = () =>
+  invoke<RerankerSettingsPublic>("get_reranker_settings");
+export const setRerankerSettings = (input: RerankerSettingsInput) =>
+  invoke<RerankerSettingsPublic>("set_reranker_settings", { input });
+
+export const indexStatus = () => invoke<IndexStatus>("index_status");
+/**
+ * Start the backfill and return the progress at that moment; it keeps running
+ * in the background, so follow it with `onIndexStatus`.
+ */
+export const indexPending = () => invoke<IndexStatus>("index_pending");
+export const clearIndex = () => invoke<IndexStatus>("clear_index");
+
+// -- retrieval --------------------------------------------------------------
+
+/** `limit` omitted means "as many as the reranker settings allow". */
+export const searchMail = (query: string, limit?: number) =>
+  invoke<SearchHit[]>("search_mail", { query, limit: limit ?? null });
+
+// -- memory -----------------------------------------------------------------
+
+export const listMemories = () => invoke<MemoryEntry[]>("list_memories");
+export const saveMemory = (input: MemoryInput) =>
+  invoke<MemoryEntry>("save_memory", { input });
+export const deleteMemory = (id: string) => invoke<void>("delete_memory", { id });
+
+// -- assistant --------------------------------------------------------------
+
+export const listConversations = (limit?: number) =>
+  invoke<Conversation[]>("list_conversations", { limit: limit ?? null });
+export const conversationTurns = (conversationId: string) =>
+  invoke<ChatTurn[]>("conversation_turns", { conversationId });
+export const deleteConversation = (id: string) =>
+  invoke<void>("delete_conversation", { id });
+
+/**
+ * Ask one question. A null `conversationId` starts a new conversation — read
+ * the id back off `reply.turn.conversationId` to keep asking into it.
+ */
+export const assistantAsk = (conversationId: string | null, text: string) =>
+  invoke<AssistantReply>("assistant_ask", { conversationId, text });
+
+/** Carry out a draft the user approved. Nothing else sends it. */
+export const confirmPendingAction = (id: string) =>
+  invoke<void>("confirm_pending_action", { id });
+
 // -- events -----------------------------------------------------------------
 
 export function onAlert(cb: (e: AlertEvent) => void): Promise<UnlistenFn> {
@@ -86,4 +151,9 @@ export function onMailChanged(cb: (accountId: string) => void): Promise<Unlisten
 
 export function onSyncStatus(cb: (s: SyncStatus) => void): Promise<UnlistenFn> {
   return listen<SyncStatus>("mailer://sync-status", (ev) => cb(ev.payload));
+}
+
+/** Progress of the embedding backfill, pushed after every batch. */
+export function onIndexStatus(cb: (s: IndexStatus) => void): Promise<UnlistenFn> {
+  return listen<IndexStatus>("mailer://index-status", (ev) => cb(ev.payload));
 }

@@ -1,0 +1,26 @@
+[package]
+name = "mailer-mcp"
+description = "MCP stdio server exposing the Mailer mailbox to any Model Context Protocol client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mailer-mcp"
+path = "src/main.rs"
+
+[dependencies]
+mailer-core = { path = "../mailer-core" }
+serde_json.workspace = true
+tracing.workspace = true
+
+# io-std carries the transport itself (stdin/stdout); the workspace feature set
+# is tuned for sockets and leaves it out.
+tokio = { workspace = true, features = ["io-std"] }
+
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# `ToolContext::new` takes the HTTP client by value, so the type has to be
+# nameable here. Same crate and TLS backend mailer-core already pulls in.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

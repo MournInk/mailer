@@ -10,12 +10,15 @@
 //! - [`sync`]    orchestration: fetch → parse → store → classify → act
 
 pub mod ai;
+pub mod assistant;
 pub mod error;
 pub mod mail;
 pub mod net;
 pub mod notify;
+pub mod rag;
 pub mod store;
 pub mod sync;
+pub mod tools;
 pub mod types;
 
 pub use error::{Error, Result};

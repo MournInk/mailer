@@ -1,7 +1,10 @@
 /**
- * AI filter configuration. Any OpenAI-compatible chat endpoint works, so the
- * form is base URL + key + model rather than a provider list; the presets are
- * only shortcuts for the three endpoints people actually use.
+ * AI filter configuration.
+ *
+ * The provider is an explicit choice rather than something sniffed from the
+ * URL: the four supported protocols differ in ways a base URL cannot express
+ * (Anthropic puts the system prompt at the top level, Gemini puts the model in
+ * the path), and guessing wrong fails in confusing ways.
  *
  * The key is write-only: `AiSettingsPublic` reports whether one is stored
  * (`hasApiKey`) but never its value, and an empty field keeps it.
@@ -10,19 +13,35 @@
 import { useEffect, useState } from "react";
 import * as api from "../../lib/api";
 import { useApp } from "../../lib/store";
-import type { AiSettingsPublic, TestResult } from "../../lib/types";
+import type { AiProvider, AiSettingsPublic, TestResult } from "../../lib/types";
 import { Icon } from "../Icon";
 import { Group, Section, SwitchField, TestOutput } from "./parts";
 
-/** Endpoint shortcuts: base URL + a model that is cheap and fast enough. */
-const ENDPOINT_PRESETS: Array<{ name: string; apiBase: string; model: string }> = [
-  { name: "OpenAI", apiBase: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  { name: "DeepSeek", apiBase: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  { name: "Ollama 本地", apiBase: "http://127.0.0.1:11434/v1", model: "qwen2.5:7b" },
+/** The four wire protocols the backend can speak. */
+const PROVIDERS: Array<{ id: AiProvider; name: string; hint: string }> = [
+  { id: "openai-compatible", name: "OpenAI 兼容", hint: "/chat/completions，也适用于 DeepSeek、Ollama、vLLM 等网关" },
+  { id: "openai-responses", name: "OpenAI Responses", hint: "OpenAI 的 /responses 接口" },
+  { id: "anthropic", name: "Anthropic", hint: "/v1/messages，使用 x-api-key" },
+  { id: "gemini", name: "Google Gemini", hint: "generateContent，模型名在 URL 路径中" },
+];
+
+/** Endpoint shortcuts: provider + base URL + a model that is cheap and fast. */
+const ENDPOINT_PRESETS: Array<{
+  name: string;
+  provider: AiProvider;
+  apiBase: string;
+  model: string;
+}> = [
+  { name: "OpenAI", provider: "openai-compatible", apiBase: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  { name: "DeepSeek", provider: "openai-compatible", apiBase: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { name: "Ollama 本地", provider: "openai-compatible", apiBase: "http://127.0.0.1:11434/v1", model: "qwen2.5:7b" },
+  { name: "Anthropic", provider: "anthropic", apiBase: "https://api.anthropic.com", model: "claude-sonnet-4-5" },
+  { name: "Gemini", provider: "gemini", apiBase: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.0-flash" },
 ];
 
 interface Draft {
   enabled: boolean;
+  provider: AiProvider;
   apiBase: string;
   apiKey: string;
   model: string;
@@ -34,6 +53,7 @@ interface Draft {
 function draftFrom(s: AiSettingsPublic): Draft {
   return {
     enabled: s.enabled,
+    provider: s.provider,
     apiBase: s.apiBase,
     apiKey: "",
     model: s.model,
@@ -97,6 +117,7 @@ export function AiTab() {
     try {
       const next = await api.setAiSettings({
         enabled: draft.enabled,
+        provider: draft.provider,
         apiBase: draft.apiBase.trim(),
         // empty → the backend keeps the stored key
         apiKey: draft.apiKey,
@@ -147,8 +168,32 @@ export function AiTab() {
       <Section
         title="模型接口"
         icon="bot"
-        sub="兼容 OpenAI Chat Completions 协议的任意服务。"
+        sub="选择服务商使用的接口协议，再填写地址与模型。"
       >
+        <div className="field">
+          <span className="field-label">接口协议</span>
+          <div className="set-choices">
+            {PROVIDERS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`set-choice${draft.provider === p.id ? " active" : ""}`}
+                disabled={busy}
+                title={p.hint}
+                onClick={() => patch({ provider: p.id })}
+              >
+                <span className="set-choice-icon">
+                  <Icon name="bot" size={15} />
+                </span>
+                <span className="set-choice-label">{p.name}</span>
+              </button>
+            ))}
+          </div>
+          <p className="field-hint">
+            {PROVIDERS.find((p) => p.id === draft.provider)?.hint}
+          </p>
+        </div>
+
         <div className="field">
           <span className="field-label">快速填充</span>
           <div className="set-choices">
@@ -157,10 +202,15 @@ export function AiTab() {
                 key={p.name}
                 type="button"
                 className={`set-choice${
-                  draft.apiBase.trim().replace(/\/+$/, "") === p.apiBase ? " active" : ""
+                  draft.provider === p.provider &&
+                  draft.apiBase.trim().replace(/\/+$/, "") === p.apiBase
+                    ? " active"
+                    : ""
                 }`}
                 disabled={busy}
-                onClick={() => patch({ apiBase: p.apiBase, model: p.model })}
+                onClick={() =>
+                  patch({ provider: p.provider, apiBase: p.apiBase, model: p.model })
+                }
               >
                 <span className="set-choice-icon">
                   <Icon name="link" size={15} />

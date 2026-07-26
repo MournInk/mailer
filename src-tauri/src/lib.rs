@@ -14,6 +14,11 @@ use tauri_plugin_notification::NotificationExt;
 
 pub struct AppState {
     pub engine: Arc<SyncEngine>,
+    /// The embedding backfill: whether one is running, and why the last one
+    /// stopped. Nothing the store can answer.
+    pub index: Arc<commands::IndexTask>,
+    /// Assistant drafts waiting for the user to approve them.
+    pub pending: Arc<commands::PendingActions>,
 }
 
 /// Bridges core events to the UI: window events + OS notifications.
@@ -82,7 +87,11 @@ pub fn run() {
             let sink = Box::new(TauriSink { app: app.handle().clone() });
             let engine = SyncEngine::new(store, sink);
             tauri::async_runtime::spawn(engine.clone().run_scheduler());
-            app.manage(AppState { engine });
+            app.manage(AppState {
+                engine,
+                index: Arc::default(),
+                pending: Arc::default(),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -108,6 +117,23 @@ pub fn run() {
             commands::delete_channel,
             commands::test_channel,
             commands::send_mail,
+            commands::get_embedding_settings,
+            commands::set_embedding_settings,
+            commands::test_embedding,
+            commands::get_reranker_settings,
+            commands::set_reranker_settings,
+            commands::index_status,
+            commands::index_pending,
+            commands::clear_index,
+            commands::search_mail,
+            commands::list_memories,
+            commands::save_memory,
+            commands::delete_memory,
+            commands::list_conversations,
+            commands::conversation_turns,
+            commands::delete_conversation,
+            commands::assistant_ask,
+            commands::confirm_pending_action,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

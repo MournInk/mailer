@@ -17,8 +17,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Test core engine
-        run: cargo test -p mailer-core
+      # The whole workspace, not just mailer-core: a type changed in the core
+      # crate is constructed in src-tauri and in mailer-mcp, and checking only
+      # the crate you edited misses exactly that.
+      - name: Test workspace
+        run: cargo test --workspace
 
   frontend:
     name: Frontend build

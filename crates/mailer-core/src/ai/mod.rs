@@ -1,4 +1,4 @@
-//! LLM triage over an OpenAI-compatible chat completions API.
+//! LLM triage over whichever wire protocol the user configured.
 //!
 //! CONTRACT:
 //! - `classify` — one message in, one [`AiAnalysis`] out. The model is asked
@@ -8,17 +8,29 @@
 //!   and retries on the next cycle.
 //! - `test` — cheap round-trip ("ping" prompt) to validate base URL, key and
 //!   model name; never panics, returns a human-readable `TestResult`.
+//! - `chat_raw` — the same provider dispatch for other modules (assistant,
+//!   summaries) so nobody reimplements four request formats.
 //!
 //! The prompt must instruct the model to output exactly:
 //! `{"category":"verification|spam|normal|important","confidence":0.0-1.0,
 //!   "summary":"...","verificationCode":"..."|null,"deletable":bool,"reason":"..."}`
 //! with `summary` in the same language as the user's mail (default 中文).
+//!
+//! Providers live one per file; [`Wire`] is the whole abstraction between them:
+//! a URL, an auth header, a request body, and how to dig the text back out.
 
+mod anthropic;
+mod gemini;
+mod openai_compat;
+mod openai_responses;
+
+use std::borrow::Cow;
+
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::types::{AiAnalysis, AiSettings, Category, EmailMessage, TestResult};
+use crate::types::{AiAnalysis, AiProvider, AiSettings, Category, EmailMessage, TestResult};
 
 /// Mail body handed to the model, in characters. Keeps a 200 KB newsletter
 /// from blowing the context window — and the user's budget.
@@ -26,17 +38,26 @@ const MAX_BODY_CHARS: usize = 4000;
 /// Reply budget for one classification. The answer is a small JSON object;
 /// this only stops a chatty model from running away.
 const MAX_TOKENS: u32 = 400;
+/// Reply budget for the connectivity probe — one word is all it may say.
+const PROBE_MAX_TOKENS: u32 = 16;
 /// Longest excerpt of a raw payload echoed into an error message.
 const SNIPPET_CHARS: usize = 400;
 /// `summary` is a one-line UI string; models routinely ignore length rules.
 const MAX_SUMMARY_CHARS: usize = 120;
 /// Anything longer than this is not an OTP — the model dumped a sentence.
 const MAX_CODE_CHARS: usize = 32;
+/// Appended to the system text for providers that have no JSON mode switch.
+const JSON_NUDGE: &str = "\n\nOutput ONLY one raw JSON object: no markdown fences, no commentary, \
+                          no text before or after it.";
 /// Tags whose boundary is a line break rather than a space when flattening HTML.
 const BLOCK_TAGS: &[&str] = &[
     "p", "div", "br", "tr", "li", "table", "ul", "ol", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
     "blockquote", "section", "article", "header", "footer", "pre",
 ];
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Classify one message with the configured LLM.
 pub async fn classify(
@@ -44,20 +65,15 @@ pub async fn classify(
     settings: &AiSettings,
     msg: &EmailMessage,
 ) -> Result<AiAnalysis> {
-    validate(settings).map_err(Error::InvalidConfig)?;
-
-    let body = json!({
-        "model": settings.model,
-        "temperature": settings.temperature,
-        "max_tokens": MAX_TOKENS,
-        "response_format": { "type": "json_object" },
-        "messages": [
-            { "role": "system", "content": system_prompt(settings) },
-            { "role": "user", "content": user_prompt(msg) },
-        ],
-    });
-
-    let content = chat(http, settings, body).await?;
+    let content = chat(
+        http,
+        settings,
+        &system_prompt(settings),
+        &user_prompt(msg),
+        MAX_TOKENS,
+        true,
+    )
+    .await?;
     parse_analysis(&content)
 }
 
@@ -69,73 +85,143 @@ pub async fn test(http: &reqwest::Client, settings: &AiSettings) -> TestResult {
 
     // Deliberately minimal: no JSON mode (some gateways reject it), tiny reply
     // budget — this checks base URL, key and model name, nothing else.
-    let body = json!({
-        "model": settings.model,
-        "temperature": 0,
-        "max_tokens": 16,
-        "messages": [
-            { "role": "system", "content": "You are a connectivity probe. Reply with the single word: pong." },
-            { "role": "user", "content": "ping" },
-        ],
-    });
+    let probe = chat(
+        http,
+        settings,
+        "You are a connectivity probe. Reply with the single word: pong.",
+        "ping",
+        PROBE_MAX_TOKENS,
+        false,
+    )
+    .await;
 
-    match chat(http, settings, body).await {
+    // Provider and model are named either way: the usual failure is a base URL
+    // that speaks a different protocol than the one selected, and the message
+    // is the only place the user can see the mismatch.
+    let who = format!("{} · 模型 {}", wire(settings.provider).label(), settings.model.trim());
+    match probe {
         Ok(reply) => TestResult {
             ok: true,
-            message: format!(
-                "连接成功，模型 {} 已响应：{}",
-                settings.model,
-                truncate_chars(&collapse_ws(&reply), 60)
-            ),
+            message: format!("连接成功（{who}），已响应：{}", truncate_chars(&collapse_ws(&reply), 60)),
         },
-        Err(e) => TestResult { ok: false, message: format!("连接失败: {e}") },
+        Err(e) => TestResult { ok: false, message: format!("连接失败（{who}）: {e}") },
     }
 }
 
+/// One free-form completion through the configured provider.
+///
+/// Shared with the assistant so provider dispatch exists exactly once.
+pub async fn chat_raw(
+    http: &reqwest::Client,
+    settings: &AiSettings,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<String> {
+    chat(http, settings, system, user, max_tokens, false).await
+}
+
+/// [`chat_raw`] for callers that need machine-readable output: providers with a
+/// JSON mode get the flag, the rest are told in prose.
+pub async fn chat_json(
+    http: &reqwest::Client,
+    settings: &AiSettings,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<String> {
+    chat(http, settings, system, user, max_tokens, true).await
+}
+
 // ---------------------------------------------------------------------------
-// HTTP plumbing
+// Provider abstraction
 // ---------------------------------------------------------------------------
 
-/// Chat completions envelope. Everything is optional: gateways differ, and a
-/// missing field must surface as our own error, not a serde failure.
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    #[serde(default)]
-    choices: Vec<ChatChoice>,
+/// One chat request, before a provider renders it into its own wire format.
+struct ChatRequest<'a> {
+    model: &'a str,
+    system: &'a str,
+    user: &'a str,
+    temperature: f32,
+    max_tokens: u32,
+    /// Ask for machine-readable JSON where the provider supports a switch.
+    json_mode: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ChatChoice {
-    #[serde(default)]
-    message: ChatMessage,
+/// Everything that differs between providers. Deliberately synchronous: the
+/// HTTP round-trip itself is shared, so the error handling cannot drift.
+///
+/// `Send + Sync` because the handle is held across the await inside [`chat`],
+/// and `sync` classifies from spawned tasks.
+trait Wire: Send + Sync {
+    /// Provider name for connectivity messages.
+    fn label(&self) -> &'static str;
+
+    /// Absolute URL for one chat request.
+    fn endpoint(&self, base: &str, model: &str) -> String;
+
+    /// Provider-specific authentication headers.
+    fn authorize(&self, req: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder;
+
+    /// The request body.
+    fn body(&self, req: &ChatRequest<'_>) -> serde_json::Value;
+
+    /// The assistant's text out of a 2xx response body.
+    fn extract(&self, raw: &str) -> Result<String>;
+
+    /// Whether the provider has a JSON-mode switch. When it has not, the ask
+    /// moves into the prompt and [`extract_json_object`] cleans up after it.
+    fn native_json_mode(&self) -> bool {
+        true
+    }
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ChatMessage {
-    #[serde(default)]
-    content: Option<String>,
+fn wire(provider: AiProvider) -> &'static dyn Wire {
+    match provider {
+        AiProvider::OpenaiCompatible => &openai_compat::OpenaiCompat,
+        AiProvider::OpenaiResponses => &openai_responses::OpenaiResponses,
+        AiProvider::Anthropic => &anthropic::Anthropic,
+        AiProvider::Gemini => &gemini::Gemini,
+    }
 }
 
-/// POST one chat completion and return the assistant's message content.
+/// POST one chat request and return the assistant's text.
 async fn chat(
     http: &reqwest::Client,
     settings: &AiSettings,
-    body: serde_json::Value,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    json_mode: bool,
 ) -> Result<String> {
-    let url = format!("{}/chat/completions", settings.api_base.trim_end_matches('/'));
-    let resp = http
-        .post(&url)
-        .bearer_auth(&settings.api_key)
-        .json(&body)
+    validate(settings).map_err(Error::InvalidConfig)?;
+
+    let w = wire(settings.provider);
+    let system = system_for(w, system, json_mode);
+    let req = ChatRequest {
+        model: settings.model.trim(),
+        system: &system,
+        user,
+        temperature: settings.temperature,
+        max_tokens,
+        json_mode,
+    };
+
+    let url = w.endpoint(settings.api_base.trim(), req.model);
+    let resp = w
+        .authorize(http.post(&url), settings.api_key.trim())
+        .json(&w.body(&req))
         .send()
         .await
-        .map_err(|e| Error::Ai(format!("请求 {url} 失败: {e}")))?;
+        // `without_url` because reqwest otherwise echoes the URL, which may
+        // carry a key the user pasted as a query parameter.
+        .map_err(|e| Error::Ai(format!("请求 {} 失败: {}", redact_url(&url), e.without_url())))?;
 
     let status = resp.status();
     let text = resp
         .text()
         .await
-        .map_err(|e| Error::Ai(format!("读取 AI 响应失败: {e}")))?;
+        .map_err(|e| Error::Ai(format!("读取 AI 响应失败: {}", e.without_url())))?;
 
     if !status.is_success() {
         // The body is the only thing that tells the user *why* (wrong key,
@@ -147,18 +233,16 @@ async fn chat(
         )));
     }
 
-    let parsed: ChatResponse = serde_json::from_str(&text)
-        .map_err(|e| Error::Ai(format!("AI 响应不是合法 JSON ({e}): {}", snippet(&text))))?;
-    let content = parsed
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content)
-        .unwrap_or_default();
-    if content.trim().is_empty() {
-        return Err(Error::Ai(format!("AI 未返回任何内容: {}", snippet(&text))));
+    w.extract(&text)
+}
+
+/// The system text as the provider will see it.
+fn system_for<'a>(w: &dyn Wire, system: &'a str, json_mode: bool) -> Cow<'a, str> {
+    if json_mode && !w.native_json_mode() {
+        Cow::Owned(format!("{system}{JSON_NUDGE}"))
+    } else {
+        Cow::Borrowed(system)
     }
-    Ok(content)
 }
 
 /// Cheap sanity check on the user's settings, before spending a request.
@@ -174,6 +258,44 @@ fn validate(settings: &AiSettings) -> std::result::Result<(), String> {
         return Err("尚未配置模型名称".to_string());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared provider helpers
+// ---------------------------------------------------------------------------
+
+/// Decode a response body, blaming the payload rather than serde's wording.
+fn decode<T: DeserializeOwned>(raw: &str) -> Result<T> {
+    serde_json::from_str(raw)
+        .map_err(|e| Error::Ai(format!("AI 响应不是合法 JSON ({e}): {}", snippet(raw))))
+}
+
+/// Refuse a well-formed response that carries no assistant text — a silent
+/// empty answer would otherwise look like a valid classification failure.
+fn require_text(text: String, raw: &str) -> Result<String> {
+    if text.trim().is_empty() {
+        return Err(Error::Ai(format!("AI 未返回任何内容: {}", snippet(raw))));
+    }
+    Ok(text)
+}
+
+/// Temperature the provider will accept. NaN would serialize as `null` and
+/// bounce the whole request, and each API has its own ceiling.
+fn clamp_temperature(value: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, max)
+    } else {
+        0.0
+    }
+}
+
+/// URL for an error message, without its query string: users do paste keys
+/// into `?key=`, and errors reach the log and the UI.
+fn redact_url(url: &str) -> &str {
+    match url.find(['?', '#']) {
+        Some(i) => &url[..i],
+        None => url,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +629,19 @@ fn decode_entities(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Fixture shared with the per-provider request-shape tests.
+#[cfg(test)]
+fn sample_request(json_mode: bool) -> ChatRequest<'static> {
+    ChatRequest {
+        model: "test-model",
+        system: "SYSTEM TEXT",
+        user: "USER TEXT",
+        temperature: 0.25,
+        max_tokens: 400,
+        json_mode,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,5 +875,79 @@ mod tests {
 
         s.api_base = String::new();
         assert!(validate(&s).is_err());
+    }
+
+    // -- Provider dispatch -------------------------------------------------
+
+    /// Every provider lands on the URL its API documents.
+    #[test]
+    fn each_provider_targets_its_own_endpoint() {
+        let cases = [
+            (AiProvider::OpenaiCompatible, "https://api.openai.com/v1", "https://api.openai.com/v1/chat/completions"),
+            (AiProvider::OpenaiResponses, "https://api.openai.com/v1/", "https://api.openai.com/v1/responses"),
+            (AiProvider::Anthropic, "https://api.anthropic.com", "https://api.anthropic.com/v1/messages"),
+            (
+                AiProvider::Gemini,
+                "https://generativelanguage.googleapis.com/v1beta",
+                "https://generativelanguage.googleapis.com/v1beta/models/m:generateContent",
+            ),
+        ];
+        for (provider, base, want) in cases {
+            assert_eq!(wire(provider).endpoint(base, "m"), want, "{provider:?}");
+        }
+    }
+
+    /// Only the provider without a JSON switch gets told in prose.
+    #[test]
+    fn json_mode_falls_back_to_a_prompt_instruction() {
+        for provider in [
+            AiProvider::OpenaiCompatible,
+            AiProvider::OpenaiResponses,
+            AiProvider::Gemini,
+        ] {
+            let w = wire(provider);
+            assert_eq!(system_for(w, "SYS", true), "SYS", "{provider:?}");
+        }
+        let anthropic = system_for(wire(AiProvider::Anthropic), "SYS", true);
+        assert!(anthropic.starts_with("SYS"));
+        assert!(anthropic.contains("ONLY one raw JSON object"));
+        // Without json_mode nobody is nagged.
+        assert_eq!(system_for(wire(AiProvider::Anthropic), "SYS", false), "SYS");
+    }
+
+    #[test]
+    fn every_provider_has_a_label() {
+        for provider in [
+            AiProvider::OpenaiCompatible,
+            AiProvider::OpenaiResponses,
+            AiProvider::Anthropic,
+            AiProvider::Gemini,
+        ] {
+            assert!(!wire(provider).label().is_empty(), "{provider:?}");
+        }
+    }
+
+    /// A key pasted into the query string must not survive into an error.
+    #[test]
+    fn redacts_query_strings_from_urls() {
+        assert_eq!(
+            redact_url("https://host/v1beta/models/m:generateContent?key=SECRET"),
+            "https://host/v1beta/models/m:generateContent"
+        );
+        assert_eq!(redact_url("https://host/v1/messages"), "https://host/v1/messages");
+    }
+
+    #[test]
+    fn temperature_is_clamped_and_nan_is_neutralized() {
+        assert!((clamp_temperature(0.25, 2.0) - 0.25).abs() < 1e-6);
+        assert!((clamp_temperature(1.7, 1.0) - 1.0).abs() < 1e-6);
+        assert!((clamp_temperature(-3.0, 2.0) - 0.0).abs() < 1e-6);
+        assert!((clamp_temperature(f32::NAN, 1.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_replies_are_rejected() {
+        assert!(require_text("  \n ".to_string(), "{}").is_err());
+        assert_eq!(require_text("ok".to_string(), "{}").unwrap(), "ok");
     }
 }
