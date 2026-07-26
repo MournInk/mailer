@@ -369,29 +369,47 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }, 400);
     };
 
-    void api.onAlert((e) => {
-      if (disposed) return;
-      setAlerts((a) =>
-        a.some((x) => x.messageId === e.messageId) ? a : [...a, e],
-      );
-    }).then((u) => unsubs.push(u));
+    // `listen` throws synchronously — not as a rejected promise — when the
+    // Tauri IPC bridge is missing. Unguarded, that throw escapes the effect,
+    // React unmounts the tree, and the user gets an empty window with no clue
+    // why. Losing live updates is bad; losing the entire UI is worse.
+    const subscribe = <T,>(
+      what: string,
+      register: (cb: (payload: T) => void) => Promise<() => void>,
+      handler: (payload: T) => void,
+    ) => {
+      try {
+        void register((payload) => {
+          if (!disposed) handler(payload);
+        })
+          .then((u) => unsubs.push(u))
+          .catch((e) => {
+            console.error(`failed to subscribe to ${what}:`, e);
+          });
+      } catch (e) {
+        console.error(`failed to subscribe to ${what}:`, e);
+      }
+    };
 
-    void api.onMailChanged(() => {
-      if (!disposed) debouncedRefresh();
-    }).then((u) => unsubs.push(u));
-
-    void api.onSyncStatus((s) => {
-      if (!disposed) setSyncMap((m) => ({ ...m, [s.accountId]: s }));
-    }).then((u) => unsubs.push(u));
+    subscribe("alerts", api.onAlert, (e) =>
+      setAlerts((a) => (a.some((x) => x.messageId === e.messageId) ? a : [...a, e])),
+    );
+    subscribe("mail-changed", api.onMailChanged, debouncedRefresh);
+    subscribe("sync-status", api.onSyncStatus, (s) =>
+      setSyncMap((m) => ({ ...m, [s.accountId]: s })),
+    );
 
     // initial load
     void refreshAccounts();
-    void api.syncStatuses().then((list) => {
-      if (disposed) return;
-      const m: Record<string, SyncStatus> = {};
-      for (const s of list) m[s.accountId] = s;
-      setSyncMap(m);
-    });
+    void api
+      .syncStatuses()
+      .then((list) => {
+        if (disposed) return;
+        const m: Record<string, SyncStatus> = {};
+        for (const s of list) m[s.accountId] = s;
+        setSyncMap(m);
+      })
+      .catch((e) => console.error("failed to read sync statuses:", e));
 
     return () => {
       disposed = true;
