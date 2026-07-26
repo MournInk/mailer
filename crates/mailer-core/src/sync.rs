@@ -27,6 +27,28 @@ const TICK: Duration = Duration::from_secs(20);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(180);
 /// Ceiling on a server-side delete round trip.
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one IDLE waits before re-issuing it. RFC 2177 allows 29 minutes;
+/// nine keeps the connection well inside the idle timeout of the NATs and
+/// load balancers that sit between a laptop and a mail server.
+const IDLE_WINDOW: Duration = Duration::from_secs(9 * 60);
+/// How often the watcher looks for accounts it is not watching yet.
+const WATCH_RESCAN: Duration = Duration::from_secs(60);
+/// Backoff bounds for a connection that keeps failing. The floor is short
+/// because the common cause is a network that just came back.
+const WATCH_BACKOFF_MIN: Duration = Duration::from_secs(5);
+const WATCH_BACKOFF_MAX: Duration = Duration::from_secs(10 * 60);
+/// Room on top of `IDLE_WINDOW` for the connect, login and teardown around it.
+const WATCH_SLACK: Duration = Duration::from_secs(60);
+
+/// Whether an account can be watched live.
+///
+/// POP3 has no IDLE and no equivalent — the protocol has no way to tell a client
+/// anything it did not ask for. And `sync_interval_secs == 0` is the user
+/// switching automatic mail off, which a held-open connection would be exactly
+/// the opposite of.
+fn watchable(account: &AccountConfig) -> bool {
+    account.protocol == Protocol::Imap && account.sync_interval_secs > 0
+}
 
 /// Bound one protocol round trip. A timeout surfaces as a normal error so the
 /// account's status shows why it stalled instead of sitting silently in sync.
@@ -176,6 +198,109 @@ impl SyncEngine {
                             tracing::warn!("sync {} failed: {e}", acc.id);
                         }
                     });
+                }
+            }
+        }
+    }
+
+    /// Hold an IMAP connection open per account so mail arrives instead of being
+    /// collected.
+    ///
+    /// The scheduler above still runs, and still has to: IDLE is not universal
+    /// (POP3 has no equivalent, and some IMAP servers do not offer it), a dropped
+    /// connection is normal on a laptop that sleeps or a phone that changes
+    /// network, and a timer is the thing that notices. This makes the common case
+    /// immediate and leaves the timer as the floor.
+    ///
+    /// One task per account, each reconnecting on its own. Spawned as a future for
+    /// the same reason as `run_scheduler`: Tauri's setup hook has no runtime in
+    /// context.
+    pub async fn run_watchers(self: Arc<Self>) {
+        // Accounts already being watched, so a rescan does not start a second
+        // connection for one that is merely mid-reconnect.
+        let mut watching: HashSet<String> = HashSet::new();
+        loop {
+            let accounts = self.store.list_accounts().unwrap_or_default();
+            for acc in accounts {
+                if !watchable(&acc) {
+                    continue;
+                }
+                if !watching.insert(acc.id.clone()) {
+                    continue;
+                }
+                let engine = Arc::clone(&self);
+                tokio::spawn(engine.watch_account(acc.id.clone()));
+            }
+            // Long enough that adding an account is picked up without the loop
+            // being a poll in its own right.
+            tokio::time::sleep(WATCH_RESCAN).await;
+            // Forget accounts that went away, so a re-added one is watched again.
+            let live: HashSet<String> = self
+                .store
+                .list_accounts()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+            watching.retain(|id| live.contains(id));
+        }
+    }
+
+    /// One account's live connection, for as long as the account exists.
+    ///
+    /// Failure is expected here — a laptop closes, a network changes, a server
+    /// recycles the connection — so the loop backs off rather than giving up, and
+    /// gives up only on the two things that will not fix themselves: the account
+    /// being gone, and a server that does not do IDLE.
+    async fn watch_account(self: Arc<Self>, account_id: String) {
+        let mut backoff = WATCH_BACKOFF_MIN;
+        loop {
+            let Ok(account) = self.store.get_account(&account_id) else {
+                tracing::debug!("watch: {account_id} 已不存在，停止监听");
+                return;
+            };
+            if account.sync_interval_secs == 0 {
+                return;
+            }
+
+            // The wait bounds itself, but only once it is waiting: a server that
+            // accepts the connection and then goes silent mid-login would hold
+            // this task forever, and this account would never be live again.
+            let waited = with_timeout(
+                IDLE_WINDOW + WATCH_SLACK,
+                "等待新邮件",
+                imap::wait_for_mail(&account, IDLE_WINDOW),
+            )
+            .await
+            .and_then(|r| r);
+
+            match waited {
+                Ok(imap::Watch::Changed) => {
+                    backoff = WATCH_BACKOFF_MIN;
+                    tracing::debug!("watch: {} 有新动静，立即同步", account.email);
+                    if let Err(e) = self.sync_account(&account_id).await {
+                        tracing::warn!("watch: {} 同步失败: {e}", account.email);
+                    }
+                }
+                Ok(imap::Watch::Quiet) => {
+                    // Go straight back to waiting. Re-issuing IDLE is what the
+                    // RFC asks for anyway.
+                    backoff = WATCH_BACKOFF_MIN;
+                }
+                Ok(imap::Watch::Unsupported) => {
+                    tracing::info!("watch: {} 不支持 IDLE，改由定时同步负责", account.email);
+                    return;
+                }
+                Err(e) => {
+                    // Includes a rejected login: retrying with a backoff is
+                    // right, because the user may be about to fix the password.
+                    tracing::debug!(
+                        "watch: {} 连接中断，{} 秒后重试: {e}",
+                        account.email,
+                        backoff.as_secs()
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(WATCH_BACKOFF_MAX);
                 }
             }
         }
@@ -636,6 +761,38 @@ mod tests {
 
     /// An unconfigured AI filter must be a no-op, not an error — the mail sync
     /// has to keep working before the user configures an LLM.
+    /// Only some accounts can be live, and getting that wrong means either a
+    /// pointless reconnect loop against POP3 or a connection the user switched off.
+    #[test]
+    fn only_imap_accounts_with_auto_sync_are_watched() {
+        let acc = AccountConfig {
+            id: "acc1".into(),
+            label: "Test".into(),
+            email: "me@example.com".into(),
+            protocol: Protocol::Imap,
+            host: "imap.example.com".into(),
+            port: 993,
+            username: "me@example.com".into(),
+            password: "secret".into(),
+            tls: TlsMode::Tls,
+            smtp: None,
+            sync_interval_secs: 300,
+            color_hue: 20,
+            created_at: 1,
+        };
+        assert!(watchable(&acc));
+
+        // POP3 cannot be told anything it did not ask for.
+        let mut pop = acc.clone();
+        pop.protocol = Protocol::Pop3;
+        assert!(!watchable(&pop));
+
+        // Automatic mail switched off.
+        let mut manual = acc.clone();
+        manual.sync_interval_secs = 0;
+        assert!(!watchable(&manual));
+    }
+
     #[tokio::test]
     async fn classify_pending_is_noop_without_ai() {
         let store = seeded_store();

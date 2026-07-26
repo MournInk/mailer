@@ -87,6 +87,10 @@ pub fn run() {
             let sink = Box::new(TauriSink { app: app.handle().clone() });
             let engine = SyncEngine::new(store, sink);
             tauri::async_runtime::spawn(engine.clone().run_scheduler());
+            // A held-open IMAP connection per account, so mail arrives rather
+            // than being collected on the next tick. The scheduler above is still
+            // the floor: IDLE is not universal and connections drop.
+            tauri::async_runtime::spawn(engine.clone().run_watchers());
             // The full-text index arrived after the mailbox did, so a database
             // from an earlier build has mail in it that nothing has indexed.
             // Purely local work — no endpoint, no key, no cost — so it runs
