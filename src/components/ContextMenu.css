@@ -1,0 +1,110 @@
+.ctxm {
+  position: fixed;
+  z-index: 80;
+  min-width: 176px;
+  max-width: 260px;
+  padding: 5px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: ctxm-in var(--dur-fast) var(--ease-out);
+}
+
+@keyframes ctxm-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.ctxm-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font-size: var(--text-base);
+  color: var(--ink-2);
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.ctxm-item:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.ctxm-item:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+.ctxm-item.danger {
+  color: var(--danger);
+}
+
+.ctxm-item.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.ctxm-icon {
+  display: inline-flex;
+  width: 16px;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ctxm-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctxm-hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
+.ctxm-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+
+/* -- selection action bar -------------------------------------------------- */
+
+.ml-selbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+  color: var(--accent-soft-ink);
+  font-size: var(--text-sm);
+}
+
+.ml-selbar-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex: 1;
+  min-width: 0;
+}
+
+.ml-selbar .btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--text-sm);
+  border-radius: var(--radius-pill);
+}

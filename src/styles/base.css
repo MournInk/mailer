@@ -16,7 +16,12 @@ body {
   margin: 0;
   font-family: var(--font-sans);
   font-size: var(--text-base);
-  line-height: 1.5;
+  line-height: var(--leading-body);
+  letter-spacing: var(--tracking-ui);
+  /* Proportional CJK punctuation and tabular digits: dates and counts line up
+     in columns, and 「，。」 stop leaving full-width gaps mid-sentence. */
+  font-feature-settings: "tnum" 1, "kern" 1;
+  font-variant-east-asian: proportional-width;
   color: var(--ink);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -66,23 +71,62 @@ a {
   box-shadow: var(--focus-ring);
 }
 
-/* -- scrollbars (Stripe-quiet) ------------------------------------------- */
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* -- scrollbars -----------------------------------------------------------
+   Overlay, not reserved: a permanent gutter steals width from every column and
+   draws a hard edge down the side of the app. The track is transparent and the
+   thumb only appears once the pointer is over the scrolling area or it is
+   actually moving, which is what the platform scrollbars on macOS and mobile
+   already do.
+
+   `scrollbar-gutter: stable` is deliberately NOT set — reserving the space is
+   the thing being avoided. Content shifting by a few pixels when a list grows
+   past the fold is the accepted cost. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
 }
+
+*:hover,
+*:focus-within {
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 ::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 8px;
+  background: transparent;
+  border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
+  transition: background var(--dur-base) var(--ease-out);
 }
+
+/* The thumb belongs to the hovered scroll container, so it is scoped to a
+   hovered ancestor rather than applied globally. */
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  background-clip: padding-box;
+}
+
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--ink-faint);
-  border: 2px solid transparent;
+  background: color-mix(in srgb, var(--ink) 38%, transparent);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--ink) 50%, transparent);
   background-clip: padding-box;
 }
 

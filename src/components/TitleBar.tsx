@@ -11,7 +11,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { hostPlatform } from "../lib/api";
-import { Icon } from "./Icon";
 import "./TitleBar.css";
 
 type Chrome = "custom" | "inset" | "none";
@@ -83,13 +82,11 @@ export function TitleBar() {
   const win = getCurrentWindow();
 
   return (
+    // No wordmark here: the sidebar carries the brand directly below it, and two
+    // stacked "Mailer" labels read as a mistake rather than as emphasis. This
+    // strip is the drag region and the window controls, nothing more.
     <div className="titlebar" data-tauri-drag-region>
-      <div className="titlebar-brand" data-tauri-drag-region>
-        <span className="titlebar-mark" aria-hidden>
-          <Icon name="mail" size={13} strokeWidth={2} />
-        </span>
-        <span className="titlebar-title">Mailer</span>
-      </div>
+      <div className="titlebar-drag" data-tauri-drag-region />
 
       <div className="titlebar-controls">
         <button

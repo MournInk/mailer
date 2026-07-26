@@ -9,7 +9,7 @@
 .ml-pane {
   /* row grid — skeletons and separators read these too, so a real row and a
      placeholder row are always exactly the same height */
-  --ml-pad-x: 12px;
+  --ml-pad-x: 14px;
   --ml-rail: 6px;
   --ml-col-gap: 8px;
   --ml-text-x: calc(var(--ml-pad-x) + var(--ml-rail) + var(--ml-col-gap));
@@ -198,6 +198,14 @@
   overflow-y: auto;
   overflow-x: hidden;
   outline: none;
+}
+
+/* Rows live in a centred measure rather than filling the pane edge to edge, so
+   the column keeps its own margins as the window widens. */
+.ml-rows {
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
 }
 /* the cursor row carries the focus affordance, not the whole container */
 .ml-scroll:focus-visible {
@@ -660,4 +668,38 @@
   .ml-code-text {
     font-size: var(--text-base);
   }
+}
+
+/* -- multi-select ---------------------------------------------------------- */
+
+/* Picked is a different state from selected: selected means "showing in the
+   reading pane", picked means "part of a batch". A row can be both. */
+.ml-row.picked {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.ml-row.picked::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+}
+
+/* The receiving mailbox, shown only when the list spans more than one account.
+   It must never push the date around, so it shrinks before the sender does. */
+.ml-acct {
+  font-size: var(--text-xs);
+  color: var(--ink-faint);
+  background: var(--surface-2);
+  border-radius: var(--radius-pill);
+  padding: 1px 7px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
 }

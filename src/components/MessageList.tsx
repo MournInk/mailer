@@ -16,6 +16,13 @@ import {
 import { formatDate, useApp } from "../lib/store";
 import { CATEGORY_LABEL, type MessageHeader } from "../lib/types";
 import { Icon } from "./Icon";
+import {
+  clipboardItems,
+  ContextMenu,
+  SEP,
+  useContextMenu,
+  type MenuItem,
+} from "./ContextMenu";
 import "./MessageList.css";
 
 /** Keystroke settling time before the search hits the backend. */
@@ -39,7 +46,17 @@ export function MessageList() {
     loadMore,
     sync,
     pushToast,
+    markRead,
+    remove,
+    openCompose,
   } = useApp();
+
+  // Multi-select: Ctrl/Cmd-click adds one, Shift-click takes a range from the
+  // last clicked row. `anchor` is that row, kept separately from the cursor so
+  // arrow-key navigation does not move the range origin.
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
+  const [anchor, setAnchor] = useState<string | null>(null);
+  const { state: menu, close: closeMenu, openAt } = useContextMenu();
 
   const items = page.items;
 
@@ -113,6 +130,157 @@ export function MessageList() {
     [select],
   );
 
+  // -- verification code copy ----------------------------------------------
+  const copyCode = useCallback(
+    async (code: string) => {
+      try {
+        await navigator.clipboard.writeText(code);
+        pushToast("ok", "验证码已复制");
+      } catch {
+        pushToast("error", "复制失败，请手动选择");
+      }
+    },
+    [pushToast],
+  );
+
+  /** Ctrl/Cmd-click toggles one row; Shift-click extends from the anchor. */
+  const onRowClick = useCallback(
+    (id: string, e: React.MouseEvent) => {
+      const additive = e.ctrlKey || e.metaKey;
+      const ranged = e.shiftKey;
+
+      if (!additive && !ranged) {
+        setPicked(new Set());
+        setAnchor(id);
+        void select(id);
+        return;
+      }
+
+      const ids = page.items.map((m) => m.id);
+      setPicked((prev) => {
+        const next = new Set(prev);
+        if (ranged && anchor) {
+          const a = ids.indexOf(anchor);
+          const b = ids.indexOf(id);
+          if (a >= 0 && b >= 0) {
+            for (const mid of ids.slice(Math.min(a, b), Math.max(a, b) + 1)) next.add(mid);
+            return next;
+          }
+        }
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      // A range keeps its origin; a toggle becomes the new origin.
+      if (!ranged) setAnchor(id);
+    },
+    [anchor, page.items, select],
+  );
+
+  const clearPicked = useCallback(() => setPicked(new Set()), []);
+
+  const bulk = useCallback(
+    async (fn: (ids: string[]) => Promise<void>) => {
+      const ids = [...picked];
+      if (ids.length === 0) return;
+      await fn(ids);
+      clearPicked();
+    },
+    [picked, clearPicked],
+  );
+
+  /** Menu for one row. Acts on the selection when the row is part of it. */
+  const rowMenu = useCallback(
+    (item: MessageHeader, e: React.MouseEvent) => {
+      const target = picked.has(item.id) && picked.size > 1 ? [...picked] : [item.id];
+      const many = target.length > 1;
+      const items: MenuItem[] = [
+        {
+          id: "open",
+          label: "打开",
+          icon: "mail",
+          disabled: many,
+          run: () => void select(item.id),
+        },
+        {
+          id: "reply",
+          label: "回复",
+          icon: "reply",
+          disabled: many,
+          run: () =>
+            openCompose({
+              accountId: item.accountId,
+              to: item.fromAddr,
+              subject: item.subject.startsWith("Re:") ? item.subject : `Re: ${item.subject}`,
+              inReplyTo: item.id,
+            }),
+        },
+        SEP,
+        {
+          id: "read",
+          label: many ? `标记 ${target.length} 封为已读` : "标记为已读",
+          icon: "check",
+          run: () => void markRead(target, true),
+        },
+        {
+          id: "unread",
+          label: many ? `标记 ${target.length} 封为未读` : "标记为未读",
+          icon: "mail",
+          run: () => void markRead(target, false),
+        },
+        {
+          id: "star",
+          label: item.starred ? "取消星标" : "加星标",
+          icon: "star",
+          disabled: many,
+          run: () => void toggleStar(item.id, !item.starred),
+        },
+        SEP,
+      ];
+
+      if (item.verificationCode) {
+        items.push({
+          id: "copy-code",
+          label: `复制验证码 ${item.verificationCode}`,
+          icon: "key",
+          run: () => copyCode(item.verificationCode!),
+        });
+      }
+      items.push(
+        {
+          id: "copy-from",
+          label: "复制发件人地址",
+          icon: "copy",
+          run: async () => {
+            await navigator.clipboard.writeText(item.fromAddr);
+            pushToast("ok", "已复制发件人地址");
+          },
+        },
+        SEP,
+        {
+          id: "delete",
+          label: many ? `删除 ${target.length} 封` : "删除",
+          icon: "trash",
+          danger: true,
+          run: async () => {
+            await remove(target, false);
+            clearPicked();
+          },
+        },
+      );
+
+      // Clipboard actions still belong here when text happens to be selected.
+      const clip = clipboardItems(e.target).filter((c) => !c.disabled);
+      if (clip.length) items.push(SEP, ...clip);
+
+      openAt(e, items);
+    },
+    [
+      clearPicked, copyCode, markRead, openAt, openCompose, picked, pushToast,
+      remove, select, toggleStar,
+    ],
+  );
+
   const onKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (items.length === 0) return;
@@ -154,19 +322,6 @@ export function MessageList() {
   useEffect(() => {
     maybeLoadMore();
   }, [maybeLoadMore]);
-
-  // -- verification code copy ----------------------------------------------
-  const copyCode = useCallback(
-    async (code: string) => {
-      try {
-        await navigator.clipboard.writeText(code);
-        pushToast("ok", "验证码已复制");
-      } catch {
-        pushToast("error", "复制失败，请手动选择");
-      }
-    },
-    [pushToast],
-  );
 
   const registerRow = useCallback((id: string, el: HTMLDivElement | null) => {
     if (el) rowRefs.current.set(id, el);
@@ -226,6 +381,29 @@ export function MessageList() {
         </div>
       </header>
 
+      {picked.size > 0 && (
+        <div className="ml-selbar" role="toolbar" aria-label="批量操作">
+          <span className="ml-selbar-count">已选 {picked.size} 封</span>
+          <button className="btn" onClick={() => void bulk((ids) => markRead(ids, true))}>
+            <Icon name="check" size={14} />
+            标记已读
+          </button>
+          <button className="btn" onClick={() => void bulk((ids) => markRead(ids, false))}>
+            标记未读
+          </button>
+          <button
+            className="btn btn-danger"
+            onClick={() => void bulk((ids) => remove(ids, false))}
+          >
+            <Icon name="trash" size={14} />
+            删除
+          </button>
+          <button className="icon-btn" onClick={clearPicked} aria-label="取消选择">
+            <Icon name="x" size={15} />
+          </button>
+        </div>
+      )}
+
       <div
         className="ml-scroll"
         ref={scrollRef}
@@ -235,6 +413,7 @@ export function MessageList() {
         role="listbox"
         aria-label="邮件列表"
       >
+        <div className="ml-rows">
         {showSkeleton ? (
           <div className="ml-skeletons" aria-hidden>
             {Array.from({ length: SKELETON_ROWS }, (_, i) => (
@@ -274,6 +453,11 @@ export function MessageList() {
                 onOpen={open}
                 onToggleStar={toggleStar}
                 onCopyCode={copyCode}
+                picked={picked.has(m.id)}
+                showAccount={!filter.accountId && accounts.length > 1}
+                accountLabel={accounts.find((a) => a.id === m.accountId)?.email ?? ""}
+                onRowClick={onRowClick}
+                onContextMenu={rowMenu}
                 registerRow={registerRow}
               />
             ))}
@@ -285,7 +469,10 @@ export function MessageList() {
             )}
           </>
         )}
+        </div>
       </div>
+
+      <ContextMenu state={menu} onClose={closeMenu} />
     </section>
   );
 }
@@ -305,6 +492,11 @@ function MessageRow({
   onToggleStar,
   onCopyCode,
   registerRow,
+  picked,
+  showAccount,
+  accountLabel,
+  onRowClick,
+  onContextMenu,
 }: {
   item: MessageHeader;
   selected: boolean;
@@ -313,6 +505,12 @@ function MessageRow({
   onToggleStar: (id: string, starred: boolean) => Promise<void>;
   onCopyCode: (code: string) => Promise<void>;
   registerRow: (id: string, el: HTMLDivElement | null) => void;
+  picked: boolean;
+  /** Which mailbox received it — shown only when the list spans accounts. */
+  showAccount: boolean;
+  accountLabel: string;
+  onRowClick: (id: string, e: React.MouseEvent) => void;
+  onContextMenu: (item: MessageHeader, e: React.MouseEvent) => void;
 }) {
   const sender = item.fromName || item.fromAddr;
   const preview = item.summary || item.snippet;
@@ -321,6 +519,7 @@ function MessageRow({
     item.unread ? "unread" : "read",
     selected ? "selected" : "",
     cursor ? "is-cursor" : "",
+    picked ? "picked" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -329,9 +528,14 @@ function MessageRow({
     <div
       className={cls}
       ref={(el) => registerRow(item.id, el)}
-      onClick={() => onOpen(item.id)}
+      onClick={(e) => {
+        // A modifier means "change the selection", not "open".
+        if (e.ctrlKey || e.metaKey || e.shiftKey) onRowClick(item.id, e);
+        else onOpen(item.id);
+      }}
+      onContextMenu={(e) => onContextMenu(item, e)}
       role="option"
-      aria-selected={selected}
+      aria-selected={selected || picked}
     >
       <span className="ml-row-rail" aria-hidden>
         <span className="ml-row-dot" />
@@ -340,6 +544,11 @@ function MessageRow({
       <div className="ml-row-body">
         <div className="ml-line">
           <span className="ml-from">{sender}</span>
+          {showAccount && accountLabel && (
+            <span className="ml-acct" title={`收件邮箱 ${accountLabel}`}>
+              {accountLabel}
+            </span>
+          )}
           {item.hasAttachments && (
             <Icon name="paperclip" size={12} className="ml-clip" />
           )}

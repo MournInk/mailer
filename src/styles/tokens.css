@@ -10,13 +10,28 @@
 
 :root {
   /* type */
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
-    Inter, Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
-    "Noto Sans CJK SC", sans-serif;
+  /* Latin first, then the CJK faces in platform order. The list is shared by
+     every surface — the mail list and the reading pane used to disagree only
+     because they set different sizes and weights over the same stack, not
+     because they used different fonts. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+    "Segoe UI", Inter, Roboto, "PingFang SC", "HarmonyOS Sans SC", "MiSans",
+    "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC",
+    sans-serif;
   --font-display: "Tiempos Headline", "Source Serif 4", "Songti SC", Georgia,
     "Times New Roman", serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
     Menlo, Consolas, monospace;
+
+  /* Shared reading measures. The list and the reading pane differ in size only,
+     never in leading ratio or tracking, which is what made them look like two
+     different apps side by side. */
+  --leading-tight: 1.35;
+  --leading-body: 1.6;
+  --leading-relaxed: 1.75;
+  /* CJK glyphs are full-width and need no extra tracking; Latin at small sizes
+     does. This is the compromise both look right at. */
+  --tracking-ui: 0.005em;
 
   --text-xs: 11px;
   --text-sm: 12.5px;
@@ -27,10 +42,13 @@
   --text-2xl: 32px;
 
   /* geometry */
-  --radius-sm: 7px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  /* Rounder than before, closer to the HeroUI feel: controls read as pills at
+     small sizes and as soft cards at large ones. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-pill: 999px;
 
   /* motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
