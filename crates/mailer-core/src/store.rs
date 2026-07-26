@@ -89,7 +89,61 @@ CREATE TABLE IF NOT EXISTS folder_state (
     uid_validity INTEGER NOT NULL,
     PRIMARY KEY (account_id, folder)
 );
+
+-- Embedding index over stored mail. One row per (message, model): changing the
+-- embedding model invalidates nothing, it just adds vectors under a new name,
+-- so switching models and switching back does not cost a re-index.
+CREATE TABLE IF NOT EXISTS message_vectors (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    model      TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    -- Little-endian f32 array. Cosine similarity runs in Rust; at personal
+    -- mailbox scale a linear scan beats carrying a vector-database dependency.
+    vec        BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (message_id, model)
+);
+
+-- What the assistant has learned about the user.
+CREATE TABLE IF NOT EXISTS memories (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    source     TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_turns (
+    id              TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+    citations_json  TEXT NOT NULL DEFAULT '[]',
+    created_at      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_turns_conv
+    ON chat_turns(conversation_id, created_at ASC);
 "#;
+
+/// Columns added after the first release. `ALTER TABLE ... ADD COLUMN` on an
+/// existing column is an error, not a no-op, so each one is attempted and its
+/// duplicate-column failure ignored.
+const MIGRATIONS: &[&str] = &[
+    // 0 until the first full pass over a newly added mailbox finishes. While
+    // it is 0, triage runs in import mode: no popups for a backlog the user
+    // has already dealt with elsewhere.
+    "ALTER TABLE accounts ADD COLUMN initial_import_done INTEGER NOT NULL DEFAULT 0",
+];
 
 impl Store {
     /// Open (and migrate) the database at `path`. Use `:memory:` in tests.
@@ -107,6 +161,14 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        for stmt in MIGRATIONS {
+            // Already applied on an existing database; anything else is real.
+            match conn.execute(stmt, []) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(Store { conn: Mutex::new(conn) })
     }
 
@@ -507,6 +569,271 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("channel {id}")))
     }
 
+    // -- import state -------------------------------------------------------
+
+    /// False while the first full pass over a newly added mailbox is still
+    /// pending. Triage consults this to decide whether to alert.
+    pub fn initial_import_done(&self, account_id: &str) -> Result<bool> {
+        self.with(|c| {
+            let v: Option<i64> = c
+                .query_row(
+                    "SELECT initial_import_done FROM accounts WHERE id=?1",
+                    params![account_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(v.unwrap_or(1) != 0)
+        })
+    }
+
+    pub fn set_initial_import_done(&self, account_id: &str, done: bool) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE accounts SET initial_import_done=?2 WHERE id=?1",
+                params![account_id, done as i64],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Messages on this account still waiting for their first classification.
+    pub fn unclassified_count(&self, account_id: &str) -> Result<u32> {
+        self.with(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE account_id=?1 AND category IS NULL AND deleted=0",
+                params![account_id],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    // -- embedding index ----------------------------------------------------
+
+    /// Store one message vector. Replaces any previous vector for this model.
+    pub fn put_vector(&self, message_id: &str, model: &str, vec: &[f32], now: i64) -> Result<()> {
+        let mut bytes = Vec::with_capacity(vec.len() * 4);
+        for v in vec {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO message_vectors (message_id, model, dim, vec, created_at)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(message_id, model) DO UPDATE SET
+                   dim=excluded.dim, vec=excluded.vec, created_at=excluded.created_at",
+                params![message_id, model, vec.len() as i64, bytes, now],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every stored vector for `model`, as (message_id, vector).
+    pub fn all_vectors(&self, model: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT v.message_id, v.vec FROM message_vectors v
+                 JOIN messages m ON m.id = v.message_id
+                 WHERE v.model = ?1 AND m.deleted = 0",
+            )?;
+            let rows = stmt.query_map(params![model], |r| {
+                let id: String = r.get(0)?;
+                let bytes: Vec<u8> = r.get(1)?;
+                Ok((id, decode_vector(&bytes)))
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Non-deleted messages with no vector under `model`, oldest first.
+    pub fn messages_missing_vectors(&self, model: &str, limit: u32) -> Result<Vec<EmailMessage>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT m.* FROM messages m
+                 LEFT JOIN message_vectors v
+                   ON v.message_id = m.id AND v.model = ?1
+                 WHERE m.deleted = 0 AND v.message_id IS NULL
+                 ORDER BY m.date ASC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![model, limit as i64], row_to_message)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// (indexed, total) for `model`, counting only live messages.
+    pub fn vector_counts(&self, model: &str) -> Result<(u32, u32)> {
+        self.with(|c| {
+            let total: u32 =
+                c.query_row("SELECT COUNT(*) FROM messages WHERE deleted=0", [], |r| r.get(0))?;
+            let indexed: u32 = c.query_row(
+                "SELECT COUNT(*) FROM message_vectors v
+                 JOIN messages m ON m.id = v.message_id
+                 WHERE v.model=?1 AND m.deleted=0",
+                params![model],
+                |r| r.get(0),
+            )?;
+            Ok((indexed, total))
+        })
+    }
+
+    pub fn clear_vectors(&self, model: &str) -> Result<usize> {
+        self.with(|c| {
+            Ok(c.execute("DELETE FROM message_vectors WHERE model=?1", params![model])?)
+        })
+    }
+
+    // -- memory -------------------------------------------------------------
+
+    pub fn upsert_memory(&self, m: &MemoryEntry) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO memories (id, kind, text, source, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                   kind=excluded.kind, text=excluded.text,
+                   source=excluded.source, updated_at=excluded.updated_at",
+                params![
+                    m.id,
+                    memory_kind_str(m.kind),
+                    m.text,
+                    m.source,
+                    m.created_at,
+                    m.updated_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_memories(&self) -> Result<Vec<MemoryEntry>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, kind, text, source, created_at, updated_at
+                 FROM memories ORDER BY updated_at DESC",
+            )?;
+            let rows = stmt.query_map([], row_to_memory)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_memory(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            let n = c.execute("DELETE FROM memories WHERE id=?1", params![id])?;
+            if n == 0 {
+                return Err(Error::NotFound(format!("memory {id}")));
+            }
+            Ok(())
+        })
+    }
+
+    /// Free-text lookup so the assistant can pull only what is relevant
+    /// instead of pasting the whole memory into every prompt.
+    pub fn search_memories(&self, needle: &str, limit: u32) -> Result<Vec<MemoryEntry>> {
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return self.list_memories();
+        }
+        self.with(|c| {
+            let pat = format!("%{}%", needle.replace('%', "\\%").replace('_', "\\_"));
+            let mut stmt = c.prepare(
+                "SELECT id, kind, text, source, created_at, updated_at FROM memories
+                 WHERE text LIKE ?1 ESCAPE '\\'
+                 ORDER BY updated_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![pat, limit as i64], row_to_memory)?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    // -- conversations ------------------------------------------------------
+
+    pub fn upsert_conversation(&self, c0: &Conversation) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(id) DO UPDATE SET
+                   title=excluded.title, updated_at=excluded.updated_at",
+                params![c0.id, c0.title, c0.created_at, c0.updated_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_conversations(&self, limit: u32) -> Result<Vec<Conversation>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, title, created_at, updated_at FROM conversations
+                 ORDER BY updated_at DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit as i64], |r| {
+                Ok(Conversation {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    created_at: r.get(2)?,
+                    updated_at: r.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn delete_conversation(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM chat_turns WHERE conversation_id=?1", params![id])?;
+            c.execute("DELETE FROM conversations WHERE id=?1", params![id])?;
+            Ok(())
+        })
+    }
+
+    pub fn append_turn(&self, t: &ChatTurn) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO chat_turns
+                 (id, conversation_id, role, content, tool_calls_json, citations_json, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    t.id,
+                    t.conversation_id,
+                    chat_role_str(t.role),
+                    t.content,
+                    serde_json::to_string(&t.tool_calls)?,
+                    serde_json::to_string(&t.citations)?,
+                    t.created_at,
+                ],
+            )?;
+            c.execute(
+                "UPDATE conversations SET updated_at=?2 WHERE id=?1",
+                params![t.conversation_id, t.created_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn conversation_turns(&self, conversation_id: &str) -> Result<Vec<ChatTurn>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, conversation_id, role, content, tool_calls_json, citations_json, created_at
+                 FROM chat_turns WHERE conversation_id=?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![conversation_id], |r| {
+                let role: String = r.get(2)?;
+                let tools: String = r.get(4)?;
+                let cites: String = r.get(5)?;
+                Ok(ChatTurn {
+                    id: r.get(0)?,
+                    conversation_id: r.get(1)?,
+                    role: parse_chat_role(&role),
+                    content: r.get(3)?,
+                    tool_calls: serde_json::from_str(&tools).unwrap_or_default(),
+                    citations: serde_json::from_str(&cites).unwrap_or_default(),
+                    created_at: r.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
     // -- settings -----------------------------------------------------------
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -537,6 +864,80 @@ impl Store {
     pub fn set_ai_settings(&self, s: &AiSettings) -> Result<()> {
         self.set_setting("ai", &serde_json::to_string(s)?)
     }
+
+    pub fn embedding_settings(&self) -> Result<EmbeddingSettings> {
+        match self.get_setting("embedding")? {
+            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            None => Ok(EmbeddingSettings::default()),
+        }
+    }
+
+    pub fn set_embedding_settings(&self, s: &EmbeddingSettings) -> Result<()> {
+        self.set_setting("embedding", &serde_json::to_string(s)?)
+    }
+
+    pub fn reranker_settings(&self) -> Result<RerankerSettings> {
+        match self.get_setting("reranker")? {
+            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            None => Ok(RerankerSettings::default()),
+        }
+    }
+
+    pub fn set_reranker_settings(&self, s: &RerankerSettings) -> Result<()> {
+        self.set_setting("reranker", &serde_json::to_string(s)?)
+    }
+}
+
+/// Little-endian f32 array as written by `put_vector`.
+fn decode_vector(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn memory_kind_str(k: MemoryKind) -> &'static str {
+    match k {
+        MemoryKind::Preference => "preference",
+        MemoryKind::Fact => "fact",
+        MemoryKind::Contact => "contact",
+    }
+}
+
+fn parse_memory_kind(s: &str) -> MemoryKind {
+    match s {
+        "contact" => MemoryKind::Contact,
+        "fact" => MemoryKind::Fact,
+        _ => MemoryKind::Preference,
+    }
+}
+
+fn chat_role_str(r: ChatRole) -> &'static str {
+    match r {
+        ChatRole::User => "user",
+        ChatRole::Assistant => "assistant",
+        ChatRole::Tool => "tool",
+    }
+}
+
+fn parse_chat_role(s: &str) -> ChatRole {
+    match s {
+        "user" => ChatRole::User,
+        "tool" => ChatRole::Tool,
+        _ => ChatRole::Assistant,
+    }
+}
+
+fn row_to_memory(r: &Row<'_>) -> rusqlite::Result<MemoryEntry> {
+    let kind: String = r.get(1)?;
+    Ok(MemoryEntry {
+        id: r.get(0)?,
+        kind: parse_memory_kind(&kind),
+        text: r.get(2)?,
+        source: r.get(3)?,
+        created_at: r.get(4)?,
+        updated_at: r.get(5)?,
+    })
 }
 
 // ---------------------------------------------------------------------------

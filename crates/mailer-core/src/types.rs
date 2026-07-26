@@ -252,7 +252,9 @@ pub struct MessagePage {
 #[serde(rename_all = "camelCase", default)]
 pub struct AiSettings {
     pub enabled: bool,
-    /// OpenAI-compatible chat completions base, e.g. "https://api.openai.com/v1".
+    /// Which wire protocol `api_base` speaks.
+    pub provider: AiProvider,
+    /// Endpoint base, e.g. "https://api.openai.com/v1".
     pub api_base: String,
     pub api_key: String,
     pub model: String,
@@ -267,6 +269,7 @@ impl Default for AiSettings {
     fn default() -> Self {
         AiSettings {
             enabled: false,
+            provider: AiProvider::OpenaiCompatible,
             api_base: "https://api.openai.com/v1".to_string(),
             api_key: String::new(),
             model: "gpt-4o-mini".to_string(),
@@ -282,6 +285,7 @@ impl Default for AiSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AiSettingsPublic {
     pub enabled: bool,
+    pub provider: AiProvider,
     pub api_base: String,
     pub has_api_key: bool,
     pub model: String,
@@ -294,6 +298,7 @@ impl From<&AiSettings> for AiSettingsPublic {
     fn from(s: &AiSettings) -> Self {
         AiSettingsPublic {
             enabled: s.enabled,
+            provider: s.provider,
             api_base: s.api_base.clone(),
             has_api_key: !s.api_key.is_empty(),
             model: s.model.clone(),
@@ -427,4 +432,299 @@ pub struct OutgoingMail {
     pub body: String,
     /// Message id being replied to, if any (sets In-Reply-To).
     pub in_reply_to: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// AI providers
+// ---------------------------------------------------------------------------
+
+/// Which wire protocol the configured endpoint speaks. The user picks this;
+/// we do not sniff it, because a wrong guess fails in confusing ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiProvider {
+    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, Ollama, vLLM, most gateways.
+    OpenaiCompatible,
+    /// `POST {base}/responses` — OpenAI's Responses API.
+    OpenaiResponses,
+    /// `POST {base}/v1/messages` with `x-api-key` + `anthropic-version`.
+    Anthropic,
+    /// `POST {base}/models/{model}:generateContent` with an `x-goog-api-key` header.
+    Gemini,
+}
+
+impl AiProvider {
+    /// Endpoint most users will want when they pick this provider.
+    pub fn default_base(&self) -> &'static str {
+        match self {
+            AiProvider::OpenaiCompatible => "https://api.openai.com/v1",
+            AiProvider::OpenaiResponses => "https://api.openai.com/v1",
+            AiProvider::Anthropic => "https://api.anthropic.com",
+            AiProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            AiProvider::OpenaiCompatible => "gpt-4o-mini",
+            AiProvider::OpenaiResponses => "gpt-4o-mini",
+            AiProvider::Anthropic => "claude-sonnet-4-5",
+            AiProvider::Gemini => "gemini-2.0-flash",
+        }
+    }
+}
+
+impl Default for AiProvider {
+    fn default() -> Self {
+        AiProvider::OpenaiCompatible
+    }
+}
+
+/// Embedding endpoint used to build the RAG index over stored mail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EmbeddingSettings {
+    pub enabled: bool,
+    pub provider: AiProvider,
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    /// Requested vector width; 0 means "whatever the model returns".
+    pub dimensions: u32,
+}
+
+impl Default for EmbeddingSettings {
+    fn default() -> Self {
+        EmbeddingSettings {
+            enabled: false,
+            provider: AiProvider::OpenaiCompatible,
+            api_base: "https://api.openai.com/v1".to_string(),
+            api_key: String::new(),
+            model: "text-embedding-3-small".to_string(),
+            dimensions: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingSettingsPublic {
+    pub enabled: bool,
+    pub provider: AiProvider,
+    pub api_base: String,
+    pub has_api_key: bool,
+    pub model: String,
+    pub dimensions: u32,
+}
+
+impl From<&EmbeddingSettings> for EmbeddingSettingsPublic {
+    fn from(s: &EmbeddingSettings) -> Self {
+        EmbeddingSettingsPublic {
+            enabled: s.enabled,
+            provider: s.provider,
+            api_base: s.api_base.clone(),
+            has_api_key: !s.api_key.is_empty(),
+            model: s.model.clone(),
+            dimensions: s.dimensions,
+        }
+    }
+}
+
+/// How retrieved candidates get reordered before they reach the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RerankerKind {
+    /// Keep the embedding similarity order.
+    None,
+    /// `POST {base}/rerank` with `{model, query, documents}` returning
+    /// `results[{index, relevance_score}]` — Jina, Cohere, Xinference, TEI.
+    RerankApi,
+    /// Ask the chat model to score each candidate. No extra service to run,
+    /// but it costs one request per rerank.
+    LlmScoring,
+}
+
+impl Default for RerankerKind {
+    fn default() -> Self {
+        RerankerKind::None
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RerankerSettings {
+    pub kind: RerankerKind,
+    pub api_base: String,
+    pub api_key: String,
+    pub model: String,
+    /// Candidates fetched from the vector index before reranking.
+    pub candidates: u32,
+    /// Results kept after reranking.
+    pub top_n: u32,
+}
+
+impl Default for RerankerSettings {
+    fn default() -> Self {
+        RerankerSettings {
+            kind: RerankerKind::None,
+            api_base: "https://api.jina.ai/v1".to_string(),
+            api_key: String::new(),
+            model: "jina-reranker-v2-base-multilingual".to_string(),
+            candidates: 40,
+            top_n: 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankerSettingsPublic {
+    pub kind: RerankerKind,
+    pub api_base: String,
+    pub has_api_key: bool,
+    pub model: String,
+    pub candidates: u32,
+    pub top_n: u32,
+}
+
+impl From<&RerankerSettings> for RerankerSettingsPublic {
+    fn from(s: &RerankerSettings) -> Self {
+        RerankerSettingsPublic {
+            kind: s.kind,
+            api_base: s.api_base.clone(),
+            has_api_key: !s.api_key.is_empty(),
+            model: s.model.clone(),
+            candidates: s.candidates,
+            top_n: s.top_n,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retrieval
+// ---------------------------------------------------------------------------
+
+/// One message the retriever considers relevant to a question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub message_id: String,
+    pub account_id: String,
+    pub subject: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub date: i64,
+    /// Excerpt that matched, already trimmed for display.
+    pub excerpt: String,
+    /// Higher is better. Comparable only within one result set.
+    pub score: f32,
+}
+
+/// Progress of the embedding index, for the settings screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexStatus {
+    pub indexed: u32,
+    pub total: u32,
+    pub model: String,
+    /// Set while a backfill is running.
+    pub building: bool,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryKind {
+    /// How the user wants the assistant to behave.
+    Preference,
+    /// Something durable about the user or their mail.
+    Fact,
+    /// Who someone is, so "给老王发封邮件" resolves to an address.
+    Contact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEntry {
+    pub id: String,
+    pub kind: MemoryKind,
+    pub text: String,
+    /// Where it came from — a message id, or "assistant" when inferred.
+    pub source: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Assistant
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    User,
+    Assistant,
+    /// A tool result folded back into the transcript.
+    Tool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTurn {
+    pub id: String,
+    pub conversation_id: String,
+    pub role: ChatRole,
+    pub content: String,
+    /// Tool invocations this turn made, for the UI to show its work.
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCallRecord>,
+    /// Messages the answer drew on.
+    #[serde(default)]
+    pub citations: Vec<SearchHit>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallRecord {
+    pub name: String,
+    /// Arguments as JSON, for display and debugging.
+    pub arguments: serde_json::Value,
+    /// Short human-readable outcome, never the full payload.
+    pub summary: String,
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    pub id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// What the assistant returns for one user message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantReply {
+    pub turn: ChatTurn,
+    /// True when the model asked to send mail and we are waiting for the user
+    /// to confirm — sending is never done on the model's word alone.
+    pub pending_confirmation: Option<PendingAction>,
+}
+
+/// An action the assistant proposes but will not perform unconfirmed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingAction {
+    pub id: String,
+    pub kind: String,
+    /// Rendered for the user to read before approving.
+    pub description: String,
+    pub payload: serde_json::Value,
 }

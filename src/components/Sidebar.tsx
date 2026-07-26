@@ -72,12 +72,15 @@ export function Sidebar() {
   return (
     <nav className="sidebar-pane">
       <header className="side-head">
-        <span className="wordmark">Mailer</span>
-        <span className="wordmark-mini" aria-hidden>
-          M
+        {/* the onboarding brand lockup, scaled down: accent chip + serif name */}
+        <span className="side-brand">
+          <span className="side-mark" aria-hidden>
+            <Icon name="mail" size={15} />
+          </span>
+          <span className="wordmark">Mailer</span>
         </span>
         <button
-          className="icon-btn"
+          className="icon-btn side-compose"
           title="写邮件"
           aria-label="写邮件"
           onClick={() => openCompose()}
@@ -88,7 +91,7 @@ export function Sidebar() {
 
       <div className="side-body">
         <section className="side-section">
-          <div className="side-section-head">视图</div>
+          <div className="side-section-head">智能分类</div>
           <div className="side-rule" />
 
           <NavRow
@@ -172,7 +175,7 @@ export function Sidebar() {
 
       <footer className="side-foot">
         <button
-          className="btn btn-ghost btn-sm sync-btn"
+          className="btn btn-sm sync-btn"
           title="立即同步全部账户"
           onClick={() => void sync()}
         >

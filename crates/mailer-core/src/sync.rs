@@ -260,6 +260,18 @@ impl SyncEngine {
             tracing::warn!("classification cycle failed: {e}");
         }
 
+        // Leave import mode only once the backlog is genuinely drained: the
+        // server had nothing new AND nothing is still waiting for triage.
+        // Flipping earlier would let the tail of the first import arrive as
+        // popups, which is exactly what import mode exists to prevent.
+        if !self.store.initial_import_done(account_id)? {
+            let pending = self.store.unclassified_count(account_id)?;
+            if inserted == 0 && pending == 0 {
+                self.store.set_initial_import_done(account_id, true)?;
+                tracing::info!("initial import finished for {account_id}; alerts are live");
+            }
+        }
+
         Ok(inserted)
     }
 
@@ -278,13 +290,23 @@ impl SyncEngine {
         let channels = self.store.list_channels()?;
         let mut done = 0u32;
         let mut consecutive_failures = 0u32;
+        // One lookup per account per cycle rather than per message.
+        let mut import_mode: HashMap<String, bool> = HashMap::new();
 
         for msg in pending {
+            let importing = match import_mode.get(&msg.account_id) {
+                Some(v) => *v,
+                None => {
+                    let v = !self.store.initial_import_done(&msg.account_id).unwrap_or(true);
+                    import_mode.insert(msg.account_id.clone(), v);
+                    v
+                }
+            };
             match ai::classify(&self.http, &settings, &msg).await {
                 Ok(analysis) => {
                     consecutive_failures = 0;
                     self.store.set_analysis(&msg.id, &analysis)?;
-                    self.act_on(&msg, &analysis, &settings, &channels).await;
+                    self.act_on(&msg, &analysis, &settings, &channels, importing).await;
                     self.sink.mail_changed(&msg.account_id);
                     done += 1;
                 }
@@ -304,18 +326,48 @@ impl SyncEngine {
         Ok(done)
     }
 
-    /// Apply the per-category policy:
+    /// Apply the per-category policy.
+    ///
+    /// Live mail:
     /// - verification → popup with the code (+ opted-in channels)
     /// - important    → popup + external channels
     /// - spam         → silent; hard-delete when allowed and model says so
     /// - normal       → silent
+    ///
+    /// Import mode (`import` = true) covers the first pass over a mailbox the
+    /// user just connected. That backlog was already dealt with in whatever
+    /// client they used before, so announcing it is noise — a thousand-message
+    /// inbox would otherwise produce a thousand popups. Nothing alerts, nothing
+    /// goes to external channels, spam is filtered out, and verification mail
+    /// is deleted outright: a code from last month is worthless and the codes
+    /// themselves are the one thing worth not leaving lying around.
     async fn act_on(
         &self,
         msg: &EmailMessage,
         analysis: &AiAnalysis,
         settings: &AiSettings,
         channels: &[NotifyChannel],
+        import: bool,
     ) {
+        if import {
+            match analysis.category {
+                Category::Spam => {
+                    // The user asked for spam to be cleared out of the backlog.
+                    // Server-side deletion still needs their explicit opt-in.
+                    self.delete_messages(
+                        std::slice::from_ref(&msg.id),
+                        settings.auto_delete_spam && analysis.deletable,
+                    )
+                    .await;
+                }
+                Category::Verification => {
+                    self.delete_messages(std::slice::from_ref(&msg.id), false).await;
+                }
+                Category::Important | Category::Normal => {}
+            }
+            return;
+        }
+
         let account_email = self
             .store
             .get_account(&msg.account_id)
@@ -424,7 +476,7 @@ impl SyncEngine {
         let analysis = ai::classify(&self.http, &settings, &msg).await?;
         self.store.set_analysis(message_id, &analysis)?;
         let channels = self.store.list_channels()?;
-        self.act_on(&msg, &analysis, &settings, &channels).await;
+        self.act_on(&msg, &analysis, &settings, &channels, false).await;
         self.sink.mail_changed(&msg.account_id);
         Ok(analysis)
     }

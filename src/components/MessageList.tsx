@@ -207,8 +207,10 @@ export function MessageList() {
         </div>
 
         <div className="ml-scope">
-          <span className="ml-scope-name">{scope}</span>
-          {scopeHint && <span className="ml-scope-hint">· {scopeHint}</span>}
+          <span className="ml-scope-lead">
+            <span className="ml-scope-name">{scope}</span>
+            {scopeHint && <span className="ml-scope-hint">{scopeHint}</span>}
+          </span>
           <span className="ml-scope-count">{page.total} 封</span>
           {page.unread > 0 && (
             <span className="ml-scope-unread">{page.unread} 未读</span>
@@ -237,15 +239,23 @@ export function MessageList() {
           <div className="ml-skeletons" aria-hidden>
             {Array.from({ length: SKELETON_ROWS }, (_, i) => (
               <div className="ml-skel-row" key={i}>
-                <div className="ml-skel-bar ml-skel-from" />
-                <div className="ml-skel-bar ml-skel-subject" />
-                <div className="ml-skel-bar ml-skel-preview" />
+                <div className="ml-skel-line">
+                  <div className="ml-skel-bar ml-skel-from" />
+                </div>
+                <div className="ml-skel-line">
+                  <div className="ml-skel-bar ml-skel-subject" />
+                </div>
+                <div className="ml-skel-line">
+                  <div className="ml-skel-bar ml-skel-preview" />
+                </div>
               </div>
             ))}
           </div>
         ) : items.length === 0 ? (
-          <div className="empty-state fade-up">
-            <Icon name={filtered ? "search" : "inbox"} size={26} />
+          <div className="empty-state ml-empty fade-up">
+            <span className="ml-empty-icon">
+              <Icon name={filtered ? "search" : "inbox"} size={20} />
+            </span>
             <p className="empty-title">{filtered ? "没有匹配的邮件" : "收件箱是空的"}</p>
             <p className="ml-empty-hint">
               {filtered
@@ -267,7 +277,12 @@ export function MessageList() {
                 registerRow={registerRow}
               />
             ))}
-            {loadingMore && <div className="ml-more">加载中…</div>}
+            {loadingMore && (
+              <div className="ml-more">
+                <Icon name="loader" size={13} className="ml-spin" />
+                加载中…
+              </div>
+            )}
           </>
         )}
       </div>
@@ -275,7 +290,13 @@ export function MessageList() {
   );
 }
 
-/** One list row — three text lines plus badges, code chip and the star. */
+/**
+ * One list row. Three fixed line boxes — sender + date, subject + category,
+ * summary — so read and unread rows share a baseline grid, plus an optional
+ * fourth line for the verification code. Every affordance has one home:
+ * attachment before the date, category at the right of the subject, star in
+ * its own rail. Nothing moves as you scroll.
+ */
 function MessageRow({
   item,
   selected,
@@ -312,44 +333,45 @@ function MessageRow({
       role="option"
       aria-selected={selected}
     >
-      <span className="ml-row-dot" aria-hidden />
+      <span className="ml-row-rail" aria-hidden>
+        <span className="ml-row-dot" />
+      </span>
 
       <div className="ml-row-body">
-        <div className="ml-line ml-line-top">
+        <div className="ml-line">
           <span className="ml-from">{sender}</span>
+          {item.hasAttachments && (
+            <Icon name="paperclip" size={12} className="ml-clip" />
+          )}
           <span className="ml-date">{formatDate(item.date)}</span>
         </div>
 
         <div className="ml-line">
           <span className="ml-subject">{item.subject || "(无主题)"}</span>
-          {item.hasAttachments && (
-            <Icon name="paperclip" size={13} className="ml-clip" />
+          {item.category && (
+            <span className={`badge badge-${item.category} ml-cat`}>
+              {CATEGORY_LABEL[item.category]}
+            </span>
           )}
         </div>
 
-        {preview && <p className="ml-preview">{preview}</p>}
+        <p className="ml-preview">{preview}</p>
 
-        {(item.category || item.verificationCode) && (
-          <div className="ml-meta">
-            {item.category && (
-              <span className={`badge badge-${item.category}`}>
-                {CATEGORY_LABEL[item.category]}
-              </span>
-            )}
-            {item.verificationCode && (
-              <button
-                className="ml-code"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void onCopyCode(item.verificationCode!);
-                }}
-                title="点击复制验证码"
-                aria-label={`复制验证码 ${item.verificationCode}`}
-              >
-                <span className="ml-code-text">{item.verificationCode}</span>
-                <Icon name="copy" size={11} />
-              </button>
-            )}
+        {item.verificationCode && (
+          <div className="ml-code-line">
+            <button
+              className="ml-code"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onCopyCode(item.verificationCode!);
+              }}
+              title="点击复制验证码"
+              aria-label={`复制验证码 ${item.verificationCode}`}
+            >
+              <Icon name="key" size={11} className="ml-code-key" />
+              <span className="ml-code-text">{item.verificationCode}</span>
+              <Icon name="copy" size={11} className="ml-code-copy" />
+            </button>
           </div>
         )}
       </div>
